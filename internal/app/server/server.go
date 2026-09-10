@@ -1,0 +1,143 @@
+package server
+
+import (
+	"fmt"
+	"net"
+	"sync"
+	"time"
+
+	"voxTun/internal/app/common/config"
+	"voxTun/internal/app/common/ipfilter"
+	"voxTun/internal/app/common/util"
+)
+
+// Server VoxTun 服务端
+type Server struct {
+	cfg       *config.ServerConfig
+	listener  net.Listener
+	clients   map[string]*ClientSession // key: 客户端唯一标识（这里用远程地址）
+	clientsMu sync.RWMutex
+	// remotePort -> *ProxyInfo，用于公网监听查找
+	proxies   map[string]*ProxyInfo
+	proxiesMu sync.RWMutex
+	workMgr   *workConnManager
+	rtpPool   *rtpPortPool
+	publicIP  string // publicAddr 解析后的公网 IP（用于 SDP 重写）
+	ipFilter  *ipfilter.Filter
+}
+
+// NewServer 创建服务端
+func NewServer(cfg *config.ServerConfig) (*Server, error) {
+	ipFilter, err := ipfilter.New(cfg.IPFilter)
+	if err != nil {
+		return nil, fmt.Errorf("init ip filter: %w", err)
+	}
+	s := &Server{
+		cfg:      cfg,
+		clients:  make(map[string]*ClientSession),
+		proxies:  make(map[string]*ProxyInfo),
+		workMgr:  newWorkConnManager(),
+		rtpPool:  newRTPPortPool(cfg),
+		publicIP: resolvePublicIP(cfg.PublicAddr),
+		ipFilter: ipFilter,
+	}
+	if ipFilter.Enabled() {
+		util.Logger.Infow("ip filter enabled", "allow", len(cfg.IPFilter.AllowList), "deny", len(cfg.IPFilter.DenyList))
+	}
+	return s, nil
+}
+
+// resolvePublicIP 将 publicAddr 解析为 IP 字面量（SDP 的 c= 字段要求 IP，不能是域名）
+func resolvePublicIP(addr string) string {
+	if addr == "" {
+		return ""
+	}
+	if net.ParseIP(addr) != nil {
+		return addr
+	}
+	if addrs, err := net.LookupHost(addr); err == nil {
+		for _, a := range addrs {
+			if net.ParseIP(a) != nil {
+				return a
+			}
+		}
+	}
+	util.Logger.Warnw("failed to resolve publicAddr to IP, SDP will contain hostname", "publicAddr", addr)
+	return addr
+}
+
+// Run 启动服务端
+func (s *Server) Run() error {
+	addr := fmt.Sprintf("%s:%d", s.cfg.BindAddr, s.cfg.BindPort)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+	s.listener = ln
+	util.Logger.Infow("voxsrv listening", "addr", addr)
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			util.Logger.Errorw("accept error", "err", err)
+			continue
+		}
+		go s.handleIncomingConn(conn)
+	}
+}
+
+// handleClient 已废弃，统一由 handleIncomingConn 处理
+func (s *Server) handleClient(conn net.Conn) {
+	s.handleIncomingConn(conn)
+}
+
+func (s *Server) addClient(c *ClientSession) {
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	s.clients[c.conn.RemoteAddr().String()] = c
+}
+
+func (s *Server) removeClient(c *ClientSession) {
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	delete(s.clients, c.conn.RemoteAddr().String())
+}
+
+// proxyKey 生成代理的唯一键：协议:端口
+func proxyKey(proxyType string, port int) string {
+	return fmt.Sprintf("%s:%d", proxyType, port)
+}
+
+// RegisterProxy 注册一个代理
+func (s *Server) RegisterProxy(p *ProxyInfo) error {
+	s.proxiesMu.Lock()
+	defer s.proxiesMu.Unlock()
+	key := proxyKey(p.proxyType, p.remotePort)
+	if _, ok := s.proxies[key]; ok {
+		return fmt.Errorf("remote %s port %d already in use", p.proxyType, p.remotePort)
+	}
+	if !s.cfg.IsPortAllowed(p.remotePort) {
+		return fmt.Errorf("remote port %d not allowed", p.remotePort)
+	}
+	s.proxies[key] = p
+	return nil
+}
+
+// UnregisterProxy 注销代理
+func (s *Server) UnregisterProxy(proxyType string, remotePort int) {
+	s.proxiesMu.Lock()
+	defer s.proxiesMu.Unlock()
+	delete(s.proxies, proxyKey(proxyType, remotePort))
+}
+
+// Shutdown 关闭服务端
+func (s *Server) Shutdown() {
+	if s.listener != nil {
+		_ = s.listener.Close()
+	}
+	s.clientsMu.Lock()
+	for _, c := range s.clients {
+		c.Close()
+	}
+	s.clientsMu.Unlock()
+	time.Sleep(100 * time.Millisecond)
+}

@@ -1,0 +1,30 @@
+# VoxTun 客户端配置
+serverAddr: "127.0.0.1"      # 服务端地址
+serverPort: 7000             # 服务端控制端口
+token: "voxTun_secret"       # 认证 token，需与服务端一致
+logLevel: "info"             # 日志级别
+
+# 代理列表
+proxies:
+  # SIP 信令（UDP 5060），支持 SDP 重写
+  - name: "sip-udp"
+    type: "sip"              # sip 类型，内部使用 UDP 中继
+    localIP: "127.0.0.1"     # 内网 SIP 服务地址
+    localPort: 5060          # 内网 SIP 服务端口
+    remotePort: 5060         # 公网暴露端口
+    rewriteSDP: true         # 是否重写 SDP（将内网地址替换为公网地址）
+
+  # IAX 信令（UDP 4569）
+  - name: "iax-udp"
+    type: "iax"              # iax 类型，内部使用 UDP 中继
+    localIP: "127.0.0.1"
+    localPort: 4569
+    remotePort: 4569
+    rewriteSDP: false
+
+  # 通用 TCP 代理示例
+  - name: "sip-tcp"
+    type: "tcp"
+    localIP: "127.0.0.1"
+    localPort: 5060
+    remotePort: 5060

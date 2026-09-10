@@ -1,0 +1,338 @@
+# VoxTun
+
+VoxTun 是一个面向 **SIP / IAX 语音信令** 的内网穿透工具，架构参考 [frp](https://github.com/fatedier/frp) 与 [nps](https://github.com/ehang-io/nps)。
+
+它将内网中的 PBX / SIP 服务器 / IAX 服务暴露到公网，使外部终端能够在内网无公网 IP 的情况下完成信令交互；内置 SIP SDP / 路由头改写与 **RTP 媒体中继**，解决信令与媒体双向的 NAT 问题。
+
+## 特性
+
+- **SIP 信令穿透**：支持 UDP 5060，改写 SDP（`c=` / `o=` / `m=`）与 Contact / Record-Route 中的内网地址
+- **IAX 信令穿透**：支持 UDP 4569，单端口承载信令与媒体
+- **RTP 媒体中继**：按 SDP 协商的媒体条目动态分配公网端口并双向转发，媒体不再依赖对端直连
+- **通用 TCP / UDP 代理**：可作为通用内网穿透工具使用
+- **同端口多协议**：同一端口号的 UDP 与 TCP 代理可共存（如 SIP 5060）
+- **Token 认证**：客户端连接需携带服务端配置的 token
+- **端口白名单**：服务端可限制允许暴露的端口范围
+- **IP 黑白名单**：基于 IP / CIDR 过滤所有外部对端，被拒来源记录日志便于排查
+- **心跳保活**：Ping/Pong 机制，服务端超时自动回收会话
+
+## 工作原理
+
+VoxTun 采用经典的「客户端主动外联 + 服务端端口监听」模型：
+
+```
+公网侧                                           内网侧
+┌─────────────┐      控制连接(外联)      ┌──────────────┐
+│  外部终端    │                          │   客户端       │
+│ (SIP话机等)  │                          │   voxcli      │
+└──────┬──────┘                          └──────┬───────┘
+       │                                        │
+       │  ① SIP/IAX 信令 (UDP 5060/4569)         │  转发
+       │  ② RTP 媒体     (UDP 10000+，动态分配)   │
+       ▼                                        ▼
+┌─────────────┐    UDPPacket / NewRTPRelay  ┌──────────────┐
+│   服务端      │◄──────────────────────────►│  内网 SIP/    │
+│   voxsrv      │      (控制连接中继)         │  IAX 服务     │
+└─────────────┘                            └──────────────┘
+```
+
+1. 客户端 `voxcli` 主动连接服务端 `voxsrv` 的控制端口（默认 7000），通过 token 认证
+2. 客户端为每个代理发送 `NewProxy` 请求，声明服务类型、内网地址、公网端口
+3. 服务端在对应公网端口创建监听（TCP `net.Listener` 或 UDP `net.UDPConn`）
+4. **TCP 代理**：外部连入时，服务端通过控制连接通知客户端新建 work 连接，客户端连接本地服务并与外部连接桥接
+5. **UDP 代理（SIP / IAX）**：服务端收到 UDP 包后封装为 `UDPPacket` 消息经控制连接发往客户端，客户端转发给本地服务并将响应原路回传
+6. **RTP 媒体中继**：服务端解析到 SDP 中的媒体条目后，从端口池分配公网端口并发 `NewRTPRelay` 通知客户端为该媒体端口建立中继，之后双向转发 RTP
+7. **SIP 改写**：SIP 消息经服务端回传外部对端时，将 SDP 与 Contact / Record-Route 中的内网地址替换为服务端公网地址
+
+## 项目结构
+
+```
+VoxTun/
+├── cmd/
+│   ├── voxsrv/                # 服务端入口
+│   │   └── main.go
+│   └── voxcli/                # 客户端入口
+│       └── main.go
+├── configs/
+│   ├── voxsrv.yaml            # 服务端配置
+│   └── voxcli.yaml            # 客户端配置
+└── internal/app/
+    ├── common/
+    │   ├── consts/            # 常量（消息类型、默认端口、心跳参数）
+    │   ├── config/            # YAML 配置加载
+    │   ├── ipfilter/          # IP 黑白名单过滤
+    │   ├── protocol/          # 控制协议消息定义与编解码
+    │   └── util/              # 连接工具、日志（zap）
+    ├── protocol/
+    │   ├── sip/               # SIP 消息解析 + SDP / 路由头重写
+    │   └── iax/               # IAX 帧解析
+    ├── server/                # 服务端：控制连接、代理监听、work连接、RTP 中继
+    └── client/                # 客户端：控制连接、work连接、UDP/RTP 中继
+```
+
+## 编译
+
+```bash
+go build -o voxsrv ./cmd/voxsrv
+go build -o voxcli ./cmd/voxcli
+
+# 交叉编译 Linux amd64
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o voxsrv ./cmd/voxsrv
+```
+
+## 快速开始
+
+### 1. 启动服务端
+
+编辑 `configs/voxsrv.yaml`：
+
+```yaml
+bindAddr: "0.0.0.0"
+bindPort: 7000
+publicAddr: "your.public.ip"   # 用于 SDP 重写的公网地址
+token: "voxTun_secret"
+logLevel: "info"
+allowPorts:
+  - start: 5060
+    end: 5061
+  - start: 4569
+    end: 4569
+  - start: 10000     # RTP 中继从 >=10000 的段中分配
+    end: 20000
+```
+
+启动：
+
+```bash
+./voxsrv -c configs/voxsrv.yaml
+```
+
+### 2. 启动客户端
+
+编辑 `configs/voxcli.yaml`：
+
+```yaml
+serverAddr: "your.public.ip"
+serverPort: 7000
+token: "voxTun_secret"
+proxies:
+  - name: "sip-udp"
+    type: "sip"
+    localIP: "127.0.0.1"
+    localPort: 5060
+    remotePort: 5060
+    rewriteSDP: true
+
+  - name: "iax-udp"
+    type: "iax"
+    localIP: "127.0.0.1"
+    localPort: 4569
+    remotePort: 4569
+```
+
+启动：
+
+```bash
+./voxcli -c configs/voxcli.yaml
+```
+
+启动后，外部终端即可通过 `your.public.ip:5060` 访问内网 SIP 服务，通过 `your.public.ip:4569` 访问 IAX 服务，RTP 媒体则通过服务端动态分配的公网端口转发。
+
+## 配置说明
+
+### 服务端（voxsrv.yaml）
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| bindAddr | string | 0.0.0.0 | 控制连接监听地址 |
+| bindPort | int | 7000 | 控制连接监听端口；需确保该端口未被占用 |
+| publicAddr | string | 空 | 公网 IP 或域名，用于 SIP SDP 重写；留空则使用 bindAddr。填域名时启动阶段会解析为 IP（SDP 的 `c=` 行不接受域名） |
+| token | string | 空 | 客户端认证 token，留空则不校验 |
+| logLevel | string | info | 日志级别：debug / info / warn / error |
+| maxPoolCount | int | 5 | 预留连接池大小（当前版本未使用） |
+| udpPacketSize | int | 1500 | 预留的 UDP 包缓冲大小（当前版本未使用） |
+| allowPorts | list | 不限制 | 允许暴露的端口范围，同时决定 RTP 中继的可用端口段（只取 end ≥ 10000 的段） |
+| ipFilter | object | 关闭 | IP 黑白名单过滤，见下文 |
+
+### 客户端（voxcli.yaml）
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| serverAddr | string | 服务端地址 |
+| serverPort | int | 服务端控制端口 |
+| token | string | 认证 token，需与服务端一致 |
+| logLevel | string | 日志级别 |
+| proxies | list | 代理列表 |
+
+单个代理项：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| name | string | 代理名称，需唯一 |
+| type | string | 代理类型：tcp / udp / sip / iax（sip / iax 内部走 UDP 中继） |
+| localIP | string | 内网服务地址 |
+| localPort | int | 内网服务端口 |
+| remotePort | int | 公网暴露端口 |
+| rewriteSDP | bool | 仅 sip 类型生效。开启后服务端才会改写 SDP / Contact / Record-Route 并启用 RTP 中继；关闭则 SIP 消息原样透传 |
+
+## RTP 媒体中继
+
+信令穿透成功后，媒体流仍需要一条可达的通道。VoxTun 的做法是：服务端解析 SIP 消息里的 SDP 媒体条目（`m=audio <port>` 与对应的 `c=` 地址），为每条媒体分配一个公网端口并中继 RTP。
+
+> 该能力由 `sip` 类型代理的 `rewriteSDP: true` 开启。关闭时服务端不做任何改写，也就不会建立 RTP 中继。
+
+- **端口分配**：从 `allowPorts` 中 `end >= 10000` 的段顺序分配（未配置时默认 10000-20000），避免与信令端口冲突
+- **按呼叫复用**：以 `Call-ID#<媒体序号>` 为键，同一呼叫内多条 SDP（如 183 / 200 OK）复用同一个中继
+- **对端地址学习**：外部对端首次发出 RTP 时记录其地址，之后客户端回传的媒体包发往该地址
+- **回收时机**：检测到任一方发送 `BYE` 时立即释放；或超时 60 秒无包自动回收（每 15 秒检查一次）
+- **连接断开**：控制连接断开时会一并销毁该客户端的所有中继
+
+## IP 黑白名单
+
+`ipFilter` 对**控制连接、TCP 代理、UDP 代理、RTP 中继**的所有外部对端生效，支持单个 IP 与 CIDR：
+
+```yaml
+ipFilter:
+  enable: true
+  allowList:          # 非空时仅放行名单内的地址
+    - "10.0.0.0/8"
+    - "203.0.113.0/24" # 客户端与话机的公网出口
+  denyList:           # 优先级高于白名单
+    - "1.2.3.4"
+```
+
+匹配规则：
+
+1. 命中 `denyList` → 拒绝
+2. `allowList` 非空 → 仅放行名单内的地址
+3. `allowList` 为空 → 放行全部（此时 `denyList` 相当于纯黑名单）
+
+注意事项：
+
+- 白名单模式下**必须同时包含客户端（voxcli）与外部终端的地址**，否则会把隧道自身挡掉
+- 移动网络下终端的公网出口 IP 会漂移，建议按运营商网段预留余量（例如用 `/20` 覆盖 16 个连续 `/24`）
+- 被拒绝的来源以 **INFO** 级别记录，同一 IP **5 分钟内只记一次**，避免扫描流量刷屏；可据此发现 IP 漂移：
+
+  ```bash
+  grep -a 'ip rejected by filter' voxsrv.log | tail -20
+  ```
+
+## 控制协议
+
+控制连接使用自定义长度帧协议，消息格式为 `[4字节长度][1字节类型][JSON载荷]`：
+
+| 消息类型 | 值 | 方向 | 说明 |
+| --- | --- | --- | --- |
+| NewProxy | 0x01 | C→S | 请求新建代理 |
+| NewProxyResp | 0x02 | S→C | 新建代理响应 |
+| NewWorkConn | 0x03 | S→C | 服务端请求新建 work 连接 |
+| StartWorkConn | 0x04 | C→S | 客户端启动 work 连接 |
+| ProxyClosed | 0x05 | C→S | 代理关闭通知 |
+| Ping | 0x06 | C→S | 心跳 |
+| Pong | 0x07 | S→C | 心跳响应 |
+| UDPPacket | 0x08 | 双向 | UDP 数据包中继 |
+| Auth | 0x09 | C→S | 客户端认证请求 |
+| AuthResp | 0x0A | S→C | 认证响应 |
+| NewRTPRelay | 0x0B | S→C | 请求客户端为 RTP 端口建立中继 |
+| NewRTPRelayResp | 0x0C | C→S | 中继建立结果 |
+| CloseRTPRelay | 0x0D | S→C | 释放 RTP 中继 |
+
+心跳参数（`internal/app/common/consts`）：客户端每 **30 秒** 发送一次 Ping，服务端超过 **90 秒** 未收到任何 Ping 则关闭该会话并回收其代理与中继。
+
+## 服务端防火墙与安全组
+
+服务端需要同时打通**两层**入方向限制，缺任何一层都会导致外部异常：
+
+1. **云主机安全组**（厂商侧）：在云厂商控制台 / API 中配置，作用于实例的网络入口，**独立于系统内防火墙**。多数厂商默认拒绝所有入方向流量。
+2. **系统防火墙**（主机侧）：`firewalld`、`ufw` 或 `iptables`，运行在操作系统内部。
+
+两层都放行后才真正可达。只配了一层时的典型现象是「服务器上 `telnet` 自己的端口通，外部却连不上」。
+
+### 需要放行的端口
+
+| 用途 | 协议 | 端口 | 建议来源 | 说明 |
+| --- | --- | --- | --- | --- |
+| 控制连接 | **TCP** | `bindPort`（默认 7000） | 仅客户端出口 IP | 客户端主动外联的目标端口；建议按来源 IP 收敛 |
+| SIP 信令 | **UDP** | 代理的 `remotePort`（如 5060） | 外部终端 | `sip` 类型代理 |
+| IAX 信令与媒体 | **UDP** | 代理的 `remotePort`（如 4569） | 外部终端 | `iax` 类型代理；单端口承载信令与媒体 |
+| RTP 媒体 | **UDP** | `allowPorts` 中 `end >= 10000` 的段（默认 10000-20000） | 外部终端 | 通话时动态分配 |
+| 通用代理 | TCP 或 UDP | 代理的 `remotePort` | 按业务需要 | `tcp` / `udp` 类型代理 |
+
+两个容易踩的坑：
+
+- **SIP / IAX / RTP 全部走 UDP**（IAX 的媒体也复用 4569 的 UDP）。安全组里误配成 TCP 是最常见的配置错误，表现为端口「已放行」但完全收不到包。
+- **UDP 无连接**：被安全组或防火墙丢弃时不会返回任何错误，客户端只会「一直没响应」。话机侧通常表现为注册超时（而非 4xx 拒绝），排查时容易误判为服务端故障。
+
+### 云安全组配置要点
+
+- 入方向规则需按上表逐条添加，出方向一般默认全放行（客户端是主动外联，客户端所在网络无需额外配置）
+- 部分厂商的安全组规则条数有限制，若 RTP 段过大（如 `10000-20000` 共 10001 个端口），建议缩小 `allowPorts` 中的媒体段以降低规则数量
+- 控制端口不宜对全网开放，可只放行客户端出口网段；若客户端出口 IP 会漂移，按运营商网段预留余量
+- 云厂商的**网络 ACL / 子网防火墙**（若使用）位于安全组之外，同样需要放行
+
+### 系统防火墙示例
+
+**firewalld**（CentOS / RHEL / Rocky）
+
+```bash
+# 控制端口：仅放行客户端出口网段
+firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="203.0.113.0/24" port port="7000" protocol="tcp" accept'
+# SIP / IAX 信令
+firewall-cmd --permanent --add-port=5060/udp
+firewall-cmd --permanent --add-port=4569/udp
+# RTP 媒体段
+firewall-cmd --permanent --add-port=10000-20000/udp
+firewall-cmd --reload
+```
+
+**ufw**（Ubuntu / Debian）
+
+```bash
+ufw allow from 203.0.113.0/24 to any port 7000 proto tcp
+ufw allow 5060/udp
+ufw allow 4569/udp
+ufw allow 10000:20000/udp
+ufw reload
+```
+
+**iptables**
+
+```bash
+iptables -A INPUT -p tcp --dport 7000 -s 203.0.113.0/24 -j ACCEPT
+iptables -A INPUT -p udp --dport 5060 -j ACCEPT
+iptables -A INPUT -p udp --dport 4569 -j ACCEPT
+iptables -A INPUT -p udp --dport 10000:20000 -j ACCEPT
+```
+
+> 若直接手写 iptables 规则，注意云镜像可能预置了 `fail2ban` 等自定义链。这类链会按来源 IP 做全协议封禁（`protocol=all`），一旦把隧道客户端的出口 IP 拉黑，会同时切断控制连接、SIP、IAX 与 RTP，且表现为「连接被拒绝」。排查命令：
+>
+> ```bash
+> iptables -L -n --line-numbers | grep -i -E 'fail2ban|DROP|REJECT'
+> fail2ban-client status                      # 查看各 jail 及其封禁列表
+> fail2ban-client set <jail> unbanip <IP>     # 解封
+> ```
+
+### 按现象排查
+
+| 现象 | 优先排查 |
+| --- | --- |
+| `voxcli` 报连接超时 / 被拒绝，服务端看不到 `client authenticated` | 控制端口未放行，或客户端出口 IP 不在白名单 |
+| 话机注册无响应（超时，不是 4xx） | 信令端口 UDP 未放行，或被 `ipFilter` / fail2ban 拦截 |
+| 能振铃并接通，但听不到声音；或通话约 30 秒后自动挂断 | RTP 端口段未放行（媒体被丢），或 PBX 侧 `rtp_timeout` 到期挂断 |
+| 服务器本机 `telnet` 通、外部不通 | 只配了系统防火墙，云安全组漏配 |
+
+## 部署提示
+
+- 客户端**不内置断线重连**，`Run()` 出错即退出。生产环境建议用 systemd 等守护进程拉起（`Restart=on-failure`），并确保控制端口可达
+- 服务端端口放行清单见上一节「服务端防火墙与安全组」
+- 对外暴露 SIP / IAX 端口会持续收到互联网扫描流量，建议配合 `ipFilter` 收敛来源，并在 PBX 侧配置 fail2ban 白名单，避免隧道出口 IP 被误封
+
+## 后续可扩展
+
+- 控制连接 TLS 加密
+- Web 管理面板：实时查看在线客户端与代理状态
+- 多客户端隔离：按 token / 客户端 ID 隔离代理与端口
+
+## License
+
+MIT

@@ -1,0 +1,30 @@
+# VoxTun 服务端配置
+bindAddr: "0.0.0.0"          # 控制连接监听地址
+bindPort: 7000               # 控制连接监听端口（客户端连接此端口）
+publicAddr: ""               # 公网 IP 或域名，用于 SIP SDP 重写；留空则使用 bindAddr
+token: "voxTun_secret"       # 客户端认证 token，留空则不校验
+logLevel: "info"             # 日志级别: debug / info / warn / error
+maxPoolCount: 5              # 预留连接池大小
+udpPacketSize: 1500          # UDP 包缓冲大小
+
+# 允许客户端代理的端口范围（不配置则不限制）
+allowPorts:
+  - start: 5060
+    end: 5061
+  - start: 4569
+    end: 4569
+  - start: 10000
+    end: 20000
+
+# IP 黑白名单过滤（对控制连接、TCP/UDP 代理、RTP 中继的所有外部对端生效）
+# 被拒绝的来源以 INFO 级别记录（同一 IP 5 分钟内只记一次），便于发现对端 IP 漂移
+ipFilter:
+  enable: false          # 是否启用，默认关闭
+  # 白名单：非空时仅放行这些 IP/CIDR，需同时包含客户端（voxcli）与外部话机的 IP
+  allowList: []
+  #   - "192.168.1.100"
+  #   - "203.0.113.10"
+  #   - "10.0.0.0/8"
+  # 黑名单：优先级高于白名单
+  denyList: []
+  #   - "1.2.3.4"
