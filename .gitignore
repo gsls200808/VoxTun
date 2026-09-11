@@ -13,6 +13,7 @@ voxcli
 # Output
 *.out
 *.log
+build/
 
 # Go workspace
 go.work

@@ -7,6 +7,8 @@ VoxTun 是一个面向 **SIP / IAX 语音信令** 的内网穿透工具，架构
 ## 特性
 
 - **SIP 信令穿透**：支持 UDP 5060，改写 SDP（`c=` / `o=` / `m=`）与 Contact / Record-Route 中的内网地址
+- **SIP over TCP 穿透**：`sip-tcp` 类型在 TCP 上传送 SIP，按 `Content-Length` 分帧并复用同一套 SDP 改写与 RTP 中继
+- **SIP over TLS 穿透**：`sip-tls` 类型由服务端原生终止 TLS（无需外部 stunnel），话机到公网走 TLS，隧道与内网仍为明文，并复用同一套 SDP 改写与 RTP 中继；同一端口可同时接受 TLS 与明文 SIP/TCP（按连接首字节自动分流）
 - **IAX 信令穿透**：支持 UDP 4569，单端口承载信令与媒体
 - **RTP 媒体中继**：按 SDP 协商的媒体条目动态分配公网端口并双向转发，媒体不再依赖对端直连
 - **通用 TCP / UDP 代理**：可作为通用内网穿透工具使用
@@ -151,6 +153,8 @@ proxies:
 | logLevel | string | info | 日志级别：debug / info / warn / error |
 | maxPoolCount | int | 5 | 预留连接池大小（当前版本未使用） |
 | udpPacketSize | int | 1500 | 预留的 UDP 包缓冲大小（当前版本未使用） |
+| tlsCertFile | string | 空 | `sip-tls` 代理使用的 TLS 证书（PEM），与 `tlsKeyFile` 必须同时配置 |
+| tlsKeyFile | string | 空 | `sip-tls` 代理使用的 TLS 私钥（PEM） |
 | allowPorts | list | 不限制 | 允许暴露的端口范围，同时决定 RTP 中继的可用端口段（只取 end ≥ 10000 的段） |
 | ipFilter | object | 关闭 | IP 黑白名单过滤，见下文 |
 
@@ -169,23 +173,51 @@ proxies:
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | name | string | 代理名称，需唯一 |
-| type | string | 代理类型：tcp / udp / sip / iax（sip / iax 内部走 UDP 中继） |
+| type | string | 代理类型：tcp / udp / sip / iax / sip-tcp / sip-tls（sip / iax 内部走 UDP 中继；sip-tcp / sip-tls 内部走 TCP 中继并做 SDP 改写与 RTP 中继，sip-tls 的监听端口同时接受 TLS 与明文 SIP/TCP） |
 | localIP | string | 内网服务地址 |
 | localPort | int | 内网服务端口 |
 | remotePort | int | 公网暴露端口 |
-| rewriteSDP | bool | 仅 sip 类型生效。开启后服务端才会改写 SDP / Contact / Record-Route 并启用 RTP 中继；关闭则 SIP 消息原样透传 |
+| rewriteSDP | bool | sip / sip-tcp / sip-tls 类型生效。开启后服务端才会改写 SDP / Contact / Record-Route 并启用 RTP 中继；关闭则 SIP 消息原样透传 |
 
 ## RTP 媒体中继
 
 信令穿透成功后，媒体流仍需要一条可达的通道。VoxTun 的做法是：服务端解析 SIP 消息里的 SDP 媒体条目（`m=audio <port>` 与对应的 `c=` 地址），为每条媒体分配一个公网端口并中继 RTP。
 
-> 该能力由 `sip` 类型代理的 `rewriteSDP: true` 开启。关闭时服务端不做任何改写，也就不会建立 RTP 中继。
+> 该能力由 `sip` / `sip-tls` 类型代理的 `rewriteSDP: true` 开启。关闭时服务端不做任何改写，也就不会建立 RTP 中继。
 
 - **端口分配**：从 `allowPorts` 中 `end >= 10000` 的段顺序分配（未配置时默认 10000-20000），避免与信令端口冲突
 - **按呼叫复用**：以 `Call-ID#<媒体序号>` 为键，同一呼叫内多条 SDP（如 183 / 200 OK）复用同一个中继
 - **对端地址学习**：外部对端首次发出 RTP 时记录其地址，之后客户端回传的媒体包发往该地址
 - **回收时机**：检测到任一方发送 `BYE` 时立即释放；或超时 60 秒无包自动回收（每 15 秒检查一次）
 - **连接断开**：控制连接断开时会一并销毁该客户端的所有中继
+
+## SIP over TCP（sip-tcp）
+
+`sip-tcp` 用于话机走**明文 TCP**（而非 UDP）传输 SIP 的场景：
+
+```
+话机 --TCP--> voxsrv:remotePort --隧道--> voxcli --明文 TCP--> Asterisk
+```
+
+- **与 `sip` 一致的能力**：服务端按 SIP over TCP 的 `Content-Length` 分帧，`内网 -> 外部` 方向做 SDP / Contact / Record-Route 改写并分配 RTP 中继，`外部 -> 内网` 方向透传并检测 `BYE` 释放中继；媒体仍为 UDP
+- **与 `tcp` 的区别**：`tcp` 类型是纯字节双向转发（不做任何 SIP 解析）；`sip-tcp` 会解析 SIP 消息，因此**必须**配合 `rewriteSDP: true` 才能让通话媒体可达
+- **内网要求**：内网 SIP 服务（Asterisk 等）需启用 **TCP** 传输并监听 `localPort`
+
+## SIP over TLS（sip-tls）
+
+`sip-tls` 用于话机侧必须走 TLS 的场景（例如运营商封锁 UDP 5060、或要求加密信令）。TLS 由**服务端原生终止**，无需额外的 stunnel：
+
+```
+话机 --TLS--> voxsrv:remotePort（终止 TLS）--隧道明文--> voxcli --明文 TCP--> Asterisk
+```
+
+- **证书配置**：服务端 `tlsCertFile` / `tlsKeyFile` 配置 PEM 证书与私钥，最低 TLS 1.2；话机需信任该证书（自签时需手动导入或关闭校验）
+- **内网要求**：内网 SIP 服务（Asterisk 等）需启用 **TCP** 传输并监听 `localPort`
+- **同端口共存**：`remotePort` 可同时接受 TLS 与明文 SIP/TCP——监听器读取连接首字节，`0x16`（TLS 握手记录）走 TLS 终止，其余按明文处理。因此可把 TLS 话机与明文 TCP 话机合并到同一端口（如 5060），**不要再为同一端口单独配置 `sip-tcp` / `tcp` 代理**，否则同端口重复绑定会失败
+- **协议处理**：无论 TLS 还是明文连接，服务端都按 SIP over TCP 的 `Content-Length` 分帧，`内网 -> 外部` 方向复用与 `sip` 类型相同的 SDP / 路由头重写与 RTP 中继，`外部 -> 内网` 方向透传；媒体仍为 UDP
+- **媒体**：RTP 走服务端动态分配的公网端口，与 `sip` 类型一致
+- **握手保护**：首字节嗅探与 TLS 握手在建立 work 连接前完成（10 秒超时），非 TLS 扫描流量不会触发隧道连接
+- **加密边界**：仅 `话机 <-> 公网服务端` 一跳加密，隧道内与内网均为明文
 
 ## IP 黑白名单
 
@@ -254,6 +286,7 @@ ipFilter:
 | --- | --- | --- | --- | --- |
 | 控制连接 | **TCP** | `bindPort`（默认 7000） | 仅客户端出口 IP | 客户端主动外联的目标端口；建议按来源 IP 收敛 |
 | SIP 信令 | **UDP** | 代理的 `remotePort`（如 5060） | 外部终端 | `sip` 类型代理 |
+| SIP over TLS / 明文 SIP-TCP | **TCP** | 代理的 `remotePort`（如 5060、5061） | 外部终端 | `sip-tls` / `sip-tcp` 类型代理；`sip-tls` 同一端口自动分流 TLS 与明文 |
 | IAX 信令与媒体 | **UDP** | 代理的 `remotePort`（如 4569） | 外部终端 | `iax` 类型代理；单端口承载信令与媒体 |
 | RTP 媒体 | **UDP** | `allowPorts` 中 `end >= 10000` 的段（默认 10000-20000） | 外部终端 | 通话时动态分配 |
 | 通用代理 | TCP 或 UDP | 代理的 `remotePort` | 按业务需要 | `tcp` / `udp` 类型代理 |
@@ -323,9 +356,87 @@ iptables -A INPUT -p udp --dport 10000:20000 -j ACCEPT
 
 ## 部署提示
 
-- 客户端**不内置断线重连**，`Run()` 出错即退出。生产环境建议用 systemd 等守护进程拉起（`Restart=on-failure`），并确保控制端口可达
+- 客户端**不内置断线重连**，`Run()` 出错即退出。生产环境建议用 systemd 等守护进程拉起（`Restart=on-failure`），并确保控制端口可达，配置方法见「开机自启（systemd）」
 - 服务端端口放行清单见上一节「服务端防火墙与安全组」
 - 对外暴露 SIP / IAX 端口会持续收到互联网扫描流量，建议配合 `ipFilter` 收敛来源，并在 PBX 侧配置 fail2ban 白名单，避免隧道出口 IP 被误封
+
+## 开机自启（systemd）
+
+服务端与客户端都**不内置守护逻辑**（进程退出即结束），生产环境用 systemd 托管：既能开机自启，也能在异常退出时自动拉起。
+
+### 服务端（voxsrv）
+
+创建 `/etc/systemd/system/voxsrv.service`：
+
+```ini
+[Unit]
+Description=VoxTun Server (voxsrv)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/voxtun
+ExecStart=/opt/voxtun/voxsrv -c /opt/voxtun/voxsrv.yaml
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+StandardOutput=append:/opt/voxtun/voxsrv.log
+StandardError=append:/opt/voxtun/voxsrv.log
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### 客户端（voxcli）
+
+创建 `/etc/systemd/system/voxcli.service`：
+
+```ini
+[Unit]
+Description=VoxTun Client (voxcli)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/voxtun
+ExecStart=/opt/voxtun/voxcli -c /opt/voxtun/voxcli.yaml
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### 启用
+
+```bash
+# 重载 unit 并设为开机自启 + 立即启动
+systemctl daemon-reload
+systemctl enable --now voxsrv     # 客户端主机执行 systemctl enable --now voxcli
+```
+
+### 常用操作
+
+```bash
+systemctl status voxsrv           # 查看运行状态
+systemctl restart voxsrv          # 重启（更换二进制或改配置后）
+systemctl stop voxsrv             # 停止
+systemctl disable --now voxsrv    # 取消开机自启并停止
+journalctl -u voxsrv -f           # 实时日志（客户端为 -u voxcli）
+```
+
+### 部署要点
+
+- **路径**：`WorkingDirectory`、`ExecStart` 中的二进制与配置路径需与实际一致；本文档统一使用 `/opt/voxtun/`（生产配置存放位置）
+- **`After=network-online.target`**：确保开机时网络就绪后再启动，避免客户端因控制端口暂不可达而反复失败
+- **`Restart=on-failure` + `RestartSec=5`**：客户端不内置断线重连，靠 systemd 兜底；服务端异常退出同样会自动拉起
+- **`LimitNOFILE=65535`**：SIP / RTP 会占用较多文件描述符与端口，建议放开
+- **日志**：服务端用 `StandardOutput/StandardError` 追加到 `/opt/voxtun/voxsrv.log`；客户端未重定向，用 `journalctl -u voxcli` 查看
+- **替换二进制**：`systemctl stop` 后再覆盖文件（`chmod +x` 保留执行位），然后 `systemctl start`；直接覆盖运行中的文件可能报 `Text file busy`
+- **证书续期无需重启**：`sip-tls` 使用的证书由服务端按文件 `ModTime` 自动重载，acme.sh / certbot 续期后不用重启 `voxsrv`，隧道不会中断
 
 ## 后续可扩展
 

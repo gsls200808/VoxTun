@@ -15,6 +15,8 @@ type ServerConfig struct {
 	LogLevel      string `yaml:"logLevel"`      // 日志级别
 	MaxPoolCount  int    `yaml:"maxPoolCount"`  // 最大连接池数量
 	UDPPacketSize int    `yaml:"udpPacketSize"` // UDP 包缓冲大小
+	TLSCertFile   string `yaml:"tlsCertFile"`   // sip-tls 代理使用的 TLS 证书（PEM）
+	TLSKeyFile    string `yaml:"tlsKeyFile"`    // sip-tls 代理使用的 TLS 私钥（PEM）
 	AllowPorts    []PortRange `yaml:"allowPorts"` // 允许客户端代理的端口范围
 	IPFilter      IPFilterConfig `yaml:"ipFilter"` // IP 黑白名单过滤
 }
@@ -47,11 +49,11 @@ type ClientConfig struct {
 // ProxyConfig 单个代理配置
 type ProxyConfig struct {
 	Name       string `yaml:"name"`       // 代理名称
-	Type       string `yaml:"type"`       // tcp / udp / sip / iax
+	Type       string `yaml:"type"`       // tcp / udp / sip / iax / sip-tcp / sip-tls
 	LocalIP    string `yaml:"localIP"`    // 内网服务地址
 	LocalPort  int    `yaml:"localPort"`  // 内网服务端口
 	RemotePort int    `yaml:"remotePort"` // 公网暴露端口
-	RewriteSDP bool   `yaml:"rewriteSDP"` // 是否重写 SDP（仅 sip 生效）
+	RewriteSDP bool   `yaml:"rewriteSDP"` // 是否重写 SDP（sip / sip-tcp / sip-tls 生效）
 }
 
 // DefaultServerConfig 默认服务端配置

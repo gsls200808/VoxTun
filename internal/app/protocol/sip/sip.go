@@ -1,7 +1,10 @@
 package sip
 
 import (
+	"bufio"
 	"bytes"
+	"fmt"
+	"io"
 	"net"
 	"regexp"
 	"strconv"
@@ -113,6 +116,48 @@ func IsSIP(data []byte) bool {
 		return true
 	}
 	return false
+}
+
+// maxSIPHeaderBytes SIP over TCP 单条消息头部长度上限，防止异常流量耗尽内存
+const maxSIPHeaderBytes = 64 * 1024
+
+// ReadMessageFromStream 从 TCP 流中读取一条完整 SIP 消息。
+// SIP over TCP 以空行结束头部，正文长度由 Content-Length 头决定；
+// 返回的字节包含头部与正文，可直接按原样转发。调用方应使用同一个 bufio.Reader。
+func ReadMessageFromStream(br *bufio.Reader) ([]byte, error) {
+	var buf bytes.Buffer
+	contentLength := 0
+	headerBytes := 0
+	for {
+		line, err := br.ReadString('\n')
+		if len(line) > 0 {
+			buf.WriteString(line)
+			headerBytes += len(line)
+			if headerBytes > maxSIPHeaderBytes {
+				return nil, fmt.Errorf("sip message header exceeds %d bytes", maxSIPHeaderBytes)
+			}
+			if lower := strings.ToLower(line); strings.HasPrefix(lower, "content-length:") {
+				if n, e := strconv.Atoi(strings.TrimSpace(line[len("content-length:"):])); e == nil && n > 0 {
+					contentLength = n
+				}
+			}
+			// 空行表示头部结束
+			if strings.TrimRight(line, "\r\n") == "" {
+				break
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	if contentLength > 0 {
+		body := make([]byte, contentLength)
+		if _, err := io.ReadFull(br, body); err != nil {
+			return nil, err
+		}
+		buf.Write(body)
+	}
+	return buf.Bytes(), nil
 }
 
 // GetHeader 获取 header（大小写不敏感）

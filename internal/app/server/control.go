@@ -140,6 +140,11 @@ func (c *ClientSession) handleNewProxy(payload []byte) {
 	if proxyType == consts.ProxyTypeIAX {
 		proxyType = consts.ProxyTypeUDP
 	}
+	if proxyType == consts.ProxyTypeSIPTCP || proxyType == consts.ProxyTypeSIPTLS {
+		// SIP over TCP / TLS 内部均走 TCP 中继：按 SIP 消息分帧转发，
+		// 回程（内网 -> 外部）复用 SDP / 路由头重写与 RTP 中继
+		proxyType = consts.ProxyTypeTCP
+	}
 
 	p := &ProxyInfo{
 		name:        req.ProxyName,

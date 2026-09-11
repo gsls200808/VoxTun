@@ -22,9 +22,22 @@ proxies:
     remotePort: 4569
     rewriteSDP: false
 
-  # 通用 TCP 代理示例
-  - name: "sip-tcp"
-    type: "tcp"
-    localIP: "127.0.0.1"
+  # SIP over TLS（服务端原生终止 TLS）
+  # 该监听器同时接受 TLS 与明文 SIP/TCP：按连接首字节嗅探（TLS ClientHello 为 0x16）自动分流，
+  # 因此可与明文 SIP/TCP 话机共用同一 remotePort（如 5060），无需再为同一端口配置 sip-tcp。
+  # 无论 TLS 还是明文连接，都由服务端按 SIP 分帧并做 SDP 改写 / RTP 中继。
+  - name: "sip-tls"
+    type: "sip-tls"
+    localIP: "127.0.0.1"     # 内网 SIP 服务地址（需支持 TCP 传输）
     localPort: 5060
-    remotePort: 5060
+    remotePort: 5060         # 与明文 SIP/TCP 共用同一公网端口
+    rewriteSDP: true
+
+  # SIP over TCP（明文，不做 TLS）——仅当不需要 TLS、只想在 TCP 上传 SIP 时使用。
+  # 与上面的 sip-tls 二选一（同一 remotePort 不能重复绑定）：
+  #   - name: "sip-tcp"
+  #     type: "sip-tcp"
+  #     localIP: "127.0.0.1"
+  #     localPort: 5060
+  #     remotePort: 5060
+  #     rewriteSDP: true     # 必须开启，否则 SDP 不改写、通话媒体不可达

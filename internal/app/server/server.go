@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
 	"sync"
@@ -24,6 +25,7 @@ type Server struct {
 	rtpPool   *rtpPortPool
 	publicIP  string // publicAddr 解析后的公网 IP（用于 SDP 重写）
 	ipFilter  *ipfilter.Filter
+	tlsConfig *tls.Config // sip-tls 代理使用的 TLS 配置（证书未配置时为 nil）
 }
 
 // NewServer 创建服务端
@@ -40,6 +42,20 @@ func NewServer(cfg *config.ServerConfig) (*Server, error) {
 		rtpPool:  newRTPPortPool(cfg),
 		publicIP: resolvePublicIP(cfg.PublicAddr),
 		ipFilter: ipFilter,
+	}
+	if cfg.TLSCertFile != "" || cfg.TLSKeyFile != "" {
+		if cfg.TLSCertFile == "" || cfg.TLSKeyFile == "" {
+			return nil, fmt.Errorf("tlsCertFile and tlsKeyFile must be set together")
+		}
+		reloader, err := newCertReloader(cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		s.tlsConfig = &tls.Config{
+			GetCertificate: reloader.getCertificate,
+			MinVersion:     tls.VersionTLS12,
+		}
+		util.Logger.Infow("tls config loaded", "cert", cfg.TLSCertFile)
 	}
 	if ipFilter.Enabled() {
 		util.Logger.Infow("ip filter enabled", "allow", len(cfg.IPFilter.AllowList), "deny", len(cfg.IPFilter.DenyList))

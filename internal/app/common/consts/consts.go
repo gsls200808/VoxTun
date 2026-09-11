@@ -1,11 +1,13 @@
-﻿package consts
+package consts
 
 // 服务类型
 const (
-	ProxyTypeTCP = "tcp"
-	ProxyTypeUDP = "udp"
-	ProxyTypeSIP = "sip" // SIP 信令 (默认 UDP 5060)
-	ProxyTypeIAX = "iax" // IAX 信令 (UDP 4569)
+	ProxyTypeTCP    = "tcp"
+	ProxyTypeUDP    = "udp"
+	ProxyTypeSIP    = "sip"     // SIP 信令 (默认 UDP 5060)
+	ProxyTypeIAX    = "iax"     // IAX 信令 (UDP 4569)
+	ProxyTypeSIPTCP = "sip-tcp" // SIP over TCP（明文，服务端做 SDP 改写与 RTP 中继）
+	ProxyTypeSIPTLS = "sip-tls" // SIP over TLS（服务端原生终止 TLS，内部走 TCP 中继）
 )
 
 // 消息类型
