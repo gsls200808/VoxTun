@@ -14,10 +14,11 @@ import (
 
 // Server VoxTun 服务端
 type Server struct {
-	cfg       *config.ServerConfig
-	listener  net.Listener
-	clients   map[string]*ClientSession // key: 客户端唯一标识（这里用远程地址）
-	clientsMu sync.RWMutex
+	cfg        *config.ServerConfig
+	configPath string // 配置文件路径，面板修改黑白名单后回写
+	listener   net.Listener
+	clients    map[string]*ClientSession // key: 客户端唯一标识（这里用远程地址）
+	clientsMu  sync.RWMutex
 	// remotePort -> *ProxyInfo，用于公网监听查找
 	proxies   map[string]*ProxyInfo
 	proxiesMu sync.RWMutex
@@ -25,26 +26,28 @@ type Server struct {
 	rtpPool   *rtpPortPool
 	publicIP  string // publicAddr 解析后的公网 IP（用于 SDP 重写）
 	ipFilter  *ipfilter.Filter
+	ipMu      sync.Mutex  // 串行化面板对黑白名单的修改
 	tlsConfig *tls.Config // sip-tls 代理使用的 TLS 配置（证书未配置时为 nil）
 	startAt   time.Time
 	web       *webServer // 管理面板（未配置 webServer.port 时为 nil）
 }
 
-// NewServer 创建服务端
-func NewServer(cfg *config.ServerConfig) (*Server, error) {
+// NewServer 创建服务端，configPath 为配置文件路径（面板回写黑白名单用）
+func NewServer(cfg *config.ServerConfig, configPath string) (*Server, error) {
 	ipFilter, err := ipfilter.New(cfg.IPFilter)
 	if err != nil {
 		return nil, fmt.Errorf("init ip filter: %w", err)
 	}
 	s := &Server{
-		cfg:      cfg,
-		clients:  make(map[string]*ClientSession),
-		proxies:  make(map[string]*ProxyInfo),
-		workMgr:  newWorkConnManager(),
-		rtpPool:  newRTPPortPool(cfg),
-		publicIP: resolvePublicIP(cfg.PublicAddr),
-		ipFilter: ipFilter,
-		startAt:  time.Now(),
+		cfg:        cfg,
+		configPath: configPath,
+		clients:    make(map[string]*ClientSession),
+		proxies:    make(map[string]*ProxyInfo),
+		workMgr:    newWorkConnManager(),
+		rtpPool:    newRTPPortPool(cfg),
+		publicIP:   resolvePublicIP(cfg.PublicAddr),
+		ipFilter:   ipFilter,
+		startAt:    time.Now(),
 	}
 	if cfg.TLSCertFile != "" || cfg.TLSKeyFile != "" {
 		if cfg.TLSCertFile == "" || cfg.TLSKeyFile == "" {

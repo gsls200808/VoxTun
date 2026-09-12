@@ -276,6 +276,78 @@ button.danger {
 button.danger:hover:not(:disabled) { background: rgba(227, 85, 97, .12); }
 button.danger:disabled { opacity: .45; cursor: not-allowed; }
 
+/* ---------- IP 黑白名单 ---------- */
+
+.panel {
+  padding: 14px 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.row + .row { margin-top: 12px; }
+
+.hint {
+  color: var(--dim);
+  font-size: 13px;
+}
+
+.input {
+  padding: 7px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+
+.input:focus { border-color: var(--accent); }
+
+input.input { width: 240px; }
+
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.switch input { accent-color: var(--accent); }
+
+.check-result {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--dim);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.check-result.ok { border-left-color: var(--ok); }
+.check-result.deny { border-left-color: var(--danger); }
+
+.lists {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.lists h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 /* ---------- 页脚 / 提示 ---------- */
 
 .foot {

@@ -1,25 +1,28 @@
 package config
 
 import (
+	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 // ServerConfig 服务端配置
 type ServerConfig struct {
-	BindPort      int    `yaml:"bindPort"`      // 控制连接监听端口
-	BindAddr      string `yaml:"bindAddr"`      // 控制连接监听地址
-	PublicAddr    string `yaml:"publicAddr"`    // 公网地址（用于 SDP 重写）
-	Token         string `yaml:"token"`         // 客户端认证 token
-	LogLevel      string `yaml:"logLevel"`      // 日志级别
-	MaxPoolCount  int    `yaml:"maxPoolCount"`  // 最大连接池数量
-	UDPPacketSize int    `yaml:"udpPacketSize"` // UDP 包缓冲大小
-	TLSCertFile   string `yaml:"tlsCertFile"`   // sip-tls 代理使用的 TLS 证书（PEM）
-	TLSKeyFile    string `yaml:"tlsKeyFile"`    // sip-tls 代理使用的 TLS 私钥（PEM）
-	AllowPorts    []PortRange `yaml:"allowPorts"` // 允许客户端代理的端口范围
-	IPFilter      IPFilterConfig `yaml:"ipFilter"` // IP 黑白名单过滤
-	WebServer     WebServerConfig `yaml:"webServer"` // 管理面板
+	BindPort      int             `yaml:"bindPort"`      // 控制连接监听端口
+	BindAddr      string          `yaml:"bindAddr"`      // 控制连接监听地址
+	PublicAddr    string          `yaml:"publicAddr"`    // 公网地址（用于 SDP 重写）
+	Token         string          `yaml:"token"`         // 客户端认证 token
+	LogLevel      string          `yaml:"logLevel"`      // 日志级别
+	MaxPoolCount  int             `yaml:"maxPoolCount"`  // 最大连接池数量
+	UDPPacketSize int             `yaml:"udpPacketSize"` // UDP 包缓冲大小
+	TLSCertFile   string          `yaml:"tlsCertFile"`   // sip-tls 代理使用的 TLS 证书（PEM）
+	TLSKeyFile    string          `yaml:"tlsKeyFile"`    // sip-tls 代理使用的 TLS 私钥（PEM）
+	AllowPorts    []PortRange     `yaml:"allowPorts"`    // 允许客户端代理的端口范围
+	IPFilter      IPFilterConfig  `yaml:"ipFilter"`      // IP 黑白名单过滤
+	WebServer     WebServerConfig `yaml:"webServer"`     // 管理面板
 }
 
 // WebServerConfig 管理面板配置
@@ -56,10 +59,10 @@ type IPFilterConfig struct {
 
 // ClientConfig 客户端配置
 type ClientConfig struct {
-	ServerAddr string `yaml:"serverAddr"` // 服务端地址
-	ServerPort int    `yaml:"serverPort"` // 服务端控制端口
-	Token      string `yaml:"token"`      // 认证 token
-	LogLevel   string `yaml:"logLevel"`   // 日志级别
+	ServerAddr string        `yaml:"serverAddr"` // 服务端地址
+	ServerPort int           `yaml:"serverPort"` // 服务端控制端口
+	Token      string        `yaml:"token"`      // 认证 token
+	LogLevel   string        `yaml:"logLevel"`   // 日志级别
 	Proxies    []ProxyConfig `yaml:"proxies"`
 }
 
@@ -118,6 +121,123 @@ func LoadClientConfig(path string) (*ClientConfig, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// SaveIPFilter 把 IP 黑白名单回写到配置文件。
+// 为避免丢失文件中其余段落的手写注释，这里只重写 ipFilter 段落，其他内容原样保留。
+// 写入采用「临时文件 + rename」，避免中途失败损坏原配置。
+func SaveIPFilter(path string, f IPFilterConfig) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	out, err := replaceIPFilterSection(string(data), f)
+	if err != nil {
+		return err
+	}
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(out), mode); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// replaceIPFilterSection 重写 ipFilter 段落的取值，段落内的注释与其他段落原样保留。
+// 段落范围为 "ipFilter:" 行到下一个顶层键之前；段落末尾的空行与顶格注释属于下一段落，不参与替换。
+// 仅替换 enable 的取值与 allowList / denyList 的条目，缺失的键补在段落末尾。
+func replaceIPFilterSection(src string, f IPFilterConfig) (string, error) {
+	lines := strings.Split(src, "\n")
+	start := -1
+	for i, ln := range lines {
+		if strings.HasPrefix(ln, "ipFilter:") {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return "", fmt.Errorf("配置文件中未找到 ipFilter 段落")
+	}
+	end := len(lines)
+	for i := start + 1; i < len(lines); i++ {
+		if ln := lines[i]; ln != "" && ln[0] != ' ' && ln[0] != '\t' {
+			end = i
+			break
+		}
+	}
+	for end > start+1 {
+		ln := lines[end-1]
+		if strings.TrimSpace(ln) == "" || strings.HasPrefix(ln, "#") {
+			end--
+			continue
+		}
+		break
+	}
+
+	body := make([]string, 0, end-start+4)
+	seen := make(map[string]bool, 3)
+	for i := start + 1; i < end; i++ {
+		ln := lines[i]
+		trimmed := strings.TrimSpace(ln)
+		switch {
+		case strings.HasPrefix(trimmed, "enable:"):
+			body = append(body, "  enable: "+strconv.FormatBool(f.Enable)+inlineComment(ln))
+			seen["enable"] = true
+		case strings.HasPrefix(trimmed, "allowList:"):
+			body = append(body, renderList("  allowList:", f.AllowList, inlineComment(ln))...)
+			seen["allowList"] = true
+		case strings.HasPrefix(trimmed, "denyList:"):
+			body = append(body, renderList("  denyList:", f.DenyList, inlineComment(ln))...)
+			seen["denyList"] = true
+		case strings.HasPrefix(trimmed, "-"):
+			// 列表条目统一由所属的键重新生成，这里跳过原有条目
+		default:
+			body = append(body, ln) // 注释、空行或未知键原样保留
+		}
+	}
+	// 原文中没有的键补在段落末尾
+	if !seen["enable"] {
+		body = append(body, "  enable: "+strconv.FormatBool(f.Enable))
+	}
+	if !seen["allowList"] {
+		body = append(body, renderList("  allowList:", f.AllowList, "")...)
+	}
+	if !seen["denyList"] {
+		body = append(body, renderList("  denyList:", f.DenyList, "")...)
+	}
+
+	out := make([]string, 0, len(lines)+4)
+	out = append(out, lines[:start+1]...)
+	out = append(out, body...)
+	out = append(out, lines[end:]...)
+	return strings.Join(out, "\n"), nil
+}
+
+// inlineComment 取出行尾的行内注释（含前导空格），没有则返回空串
+func inlineComment(ln string) string {
+	i := strings.Index(ln, "#")
+	if i < 0 {
+		return ""
+	}
+	return " " + strings.TrimSpace(ln[i:])
+}
+
+func renderList(key string, items []string, comment string) []string {
+	if len(items) == 0 {
+		return []string{key + " []" + comment}
+	}
+	out := []string{key + comment}
+	for _, it := range items {
+		out = append(out, "    - "+strconv.Quote(it))
+	}
+	return out
 }
 
 // IsPortAllowed 检查端口是否在允许范围内

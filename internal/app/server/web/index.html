@@ -140,6 +140,81 @@
       </div>
     </section>
 
+    <section class="block">
+      <h2>IP 黑白名单
+        <span class="count">{{ ipf.allowList.length }} 白 / {{ ipf.denyList.length }} 黑</span>
+      </h2>
+
+      <div class="panel">
+        <div class="row">
+          <label class="switch">
+            <input type="checkbox" :checked="ipf.enable" @change="toggleIPFilter($event.target.checked)">
+            启用 IP 过滤
+          </label>
+          <span class="hint">关闭时全部放行；启用后黑名单优先，白名单非空时仅放行白名单内的来源</span>
+        </div>
+
+        <div class="row">
+          <input class="input" v-model="checkIP" placeholder="输入 IP，例如 203.0.113.10"
+                 @keyup.enter="checkIPFilter">
+          <button class="ghost" @click="checkIPFilter">检测</button>
+          <select class="input" v-model="addMask">
+            <option value="0">按 IP 添加</option>
+            <option value="24">按掩码 /24 添加</option>
+            <option value="16">按掩码 /16 添加</option>
+          </select>
+          <button class="ghost" @click="addIPFilter('allow')">加入白名单</button>
+          <button class="ghost" @click="addIPFilter('deny')">加入黑名单</button>
+        </div>
+
+        <p class="check-result" v-if="checkResult" :class="checkResult.allowed ? 'ok' : 'deny'">
+          {{ checkResult.text }}
+        </p>
+      </div>
+
+      <div class="lists">
+        <div>
+          <h3>白名单 <span class="count">{{ ipf.allowList.length }}</span></h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>条目</th><th>操作</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="v in ipf.allowList" :key="v">
+                  <td class="strong">{{ v }}</td>
+                  <td><button class="danger" @click="removeIPFilter('allow', v)">删除</button></td>
+                </tr>
+                <tr v-if="ipf.allowList.length === 0">
+                  <td colspan="2" class="empty">白名单为空，不限制来源</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div>
+          <h3>黑名单 <span class="count">{{ ipf.denyList.length }}</span></h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>条目</th><th>操作</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="v in ipf.denyList" :key="v">
+                  <td class="strong">{{ v }}</td>
+                  <td><button class="danger" @click="removeIPFilter('deny', v)">删除</button></td>
+                </tr>
+                <tr v-if="ipf.denyList.length === 0">
+                  <td colspan="2" class="empty">黑名单为空</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <footer class="foot">
       <span>每 3 秒自动刷新</span>
       <button class="ghost" @click="refresh">立即刷新</button>

@@ -11,11 +11,13 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"voxTun/internal/app/common/config"
 	"voxTun/internal/app/common/consts"
+	"voxTun/internal/app/common/ipfilter"
 	"voxTun/internal/app/common/util"
 )
 
@@ -59,6 +61,11 @@ func newWebServer(srv *Server) (*webServer, error) {
 	mux.HandleFunc("/api/overview", w.requireAuth(srv.handleOverview))
 	mux.HandleFunc("/api/proxy/close", w.requireAuth(srv.handleProxyClose))
 	mux.HandleFunc("/api/client/close", w.requireAuth(srv.handleClientClose))
+	mux.HandleFunc("/api/ipfilter", w.requireAuth(srv.handleIPFilterGet))
+	mux.HandleFunc("/api/ipfilter/toggle", w.requireAuth(srv.handleIPFilterToggle))
+	mux.HandleFunc("/api/ipfilter/add", w.requireAuth(srv.handleIPFilterAdd))
+	mux.HandleFunc("/api/ipfilter/remove", w.requireAuth(srv.handleIPFilterRemove))
+	mux.HandleFunc("/api/ipfilter/check", w.requireAuth(srv.handleIPFilterCheck))
 	w.httpSrv = &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", w.cfg.Addr, w.cfg.Port),
 		Handler:           mux,
@@ -385,6 +392,234 @@ func (s *Server) clientSessions() []*ClientSession {
 		out = append(out, c)
 	}
 	return out
+}
+
+// ---------------- IP 黑白名单 ----------------
+
+// ipFilterView 面板展示用的黑白名单数据
+type ipFilterView struct {
+	Enable    bool     `json:"enable"`
+	AllowList []string `json:"allowList"`
+	DenyList  []string `json:"denyList"`
+}
+
+// ipFilterView 读取当前生效的黑白名单（列表始终为数组，避免前端拿到 null）
+func (s *Server) ipFilterView() ipFilterView {
+	f := s.currentIPFilter()
+	return ipFilterView{
+		Enable:    f.Enable,
+		AllowList: append([]string{}, f.AllowList...),
+		DenyList:  append([]string{}, f.DenyList...),
+	}
+}
+
+// currentIPFilter 返回当前生效的黑白名单配置
+func (s *Server) currentIPFilter() config.IPFilterConfig {
+	s.ipMu.Lock()
+	defer s.ipMu.Unlock()
+	return s.cfg.IPFilter
+}
+
+// mutateIPFilter 在锁内修改黑白名单，依次完成「校验 → 回写配置文件 → 运行期生效」。
+// 任一步失败都返回错误，当前生效的名单与磁盘配置保持原样。
+func (s *Server) mutateIPFilter(mutate func(*config.IPFilterConfig) error) error {
+	s.ipMu.Lock()
+	defer s.ipMu.Unlock()
+
+	next := config.IPFilterConfig{
+		Enable:    s.cfg.IPFilter.Enable,
+		AllowList: append([]string{}, s.cfg.IPFilter.AllowList...),
+		DenyList:  append([]string{}, s.cfg.IPFilter.DenyList...),
+	}
+	if err := mutate(&next); err != nil {
+		return err
+	}
+	if err := ipfilter.Validate(next); err != nil {
+		return err
+	}
+	if s.configPath == "" {
+		return fmt.Errorf("未指定配置文件路径，无法回写配置")
+	}
+	if err := config.SaveIPFilter(s.configPath, next); err != nil {
+		return fmt.Errorf("回写配置失败: %w", err)
+	}
+	if err := s.ipFilter.Reload(next); err != nil {
+		return err
+	}
+	s.cfg.IPFilter = next
+	util.Logger.Infow("ip filter updated by dashboard",
+		"enable", next.Enable, "allow", len(next.AllowList), "deny", len(next.DenyList))
+	return nil
+}
+
+// pickList 取 allow/deny 对应的名单字段
+func pickList(f *config.IPFilterConfig, name string) (*[]string, error) {
+	switch name {
+	case "allow":
+		return &f.AllowList, nil
+	case "deny":
+		return &f.DenyList, nil
+	default:
+		return nil, fmt.Errorf("未知的名单类型 %q", name)
+	}
+}
+
+func (s *Server) handleIPFilterGet(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(rw, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	writeJSON(rw, http.StatusOK, s.ipFilterView())
+}
+
+func (s *Server) handleIPFilterToggle(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(rw, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		Enable bool `json:"enable"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(rw, r.Body, maxBodySize)).Decode(&req); err != nil {
+		writeJSON(rw, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	err := s.mutateIPFilter(func(f *config.IPFilterConfig) error {
+		f.Enable = req.Enable
+		return nil
+	})
+	if err != nil {
+		writeJSON(rw, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(rw, http.StatusOK, s.ipFilterView())
+}
+
+func (s *Server) handleIPFilterAdd(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(rw, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		List string `json:"list"` // allow / deny
+		IP   string `json:"ip"`   // 单个 IP 或 CIDR
+		Mask int    `json:"mask"` // 0/32 按 IP 添加，24/16 等按掩码添加
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(rw, r.Body, maxBodySize)).Decode(&req); err != nil {
+		writeJSON(rw, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	entry, err := normalizeIPEntry(req.IP, req.Mask)
+	if err != nil {
+		writeJSON(rw, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	err = s.mutateIPFilter(func(f *config.IPFilterConfig) error {
+		list, err := pickList(f, req.List)
+		if err != nil {
+			return err
+		}
+		for _, it := range *list { // 已存在则视为成功，避免重复条目
+			if it == entry {
+				return nil
+			}
+		}
+		*list = append(*list, entry)
+		return nil
+	})
+	if err != nil {
+		writeJSON(rw, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	util.Logger.Infow("ip filter entry added by dashboard", "list", req.List, "entry", entry)
+	writeJSON(rw, http.StatusOK, s.ipFilterView())
+}
+
+func (s *Server) handleIPFilterRemove(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(rw, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		List  string `json:"list"`
+		Value string `json:"value"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(rw, r.Body, maxBodySize)).Decode(&req); err != nil || req.Value == "" {
+		writeJSON(rw, http.StatusBadRequest, map[string]string{"error": "缺少要删除的条目"})
+		return
+	}
+	err := s.mutateIPFilter(func(f *config.IPFilterConfig) error {
+		list, err := pickList(f, req.List)
+		if err != nil {
+			return err
+		}
+		kept := make([]string, 0, len(*list))
+		for _, it := range *list {
+			if it != req.Value {
+				kept = append(kept, it)
+			}
+		}
+		*list = kept
+		return nil
+	})
+	if err != nil {
+		writeJSON(rw, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	util.Logger.Infow("ip filter entry removed by dashboard", "list", req.List, "entry", req.Value)
+	writeJSON(rw, http.StatusOK, s.ipFilterView())
+}
+
+func (s *Server) handleIPFilterCheck(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(rw, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		IP string `json:"ip"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(rw, r.Body, maxBodySize)).Decode(&req); err != nil {
+		writeJSON(rw, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	ip := net.ParseIP(strings.TrimSpace(req.IP))
+	if ip == nil {
+		writeJSON(rw, http.StatusBadRequest, map[string]string{"error": "不是合法的 IP 地址"})
+		return
+	}
+	writeJSON(rw, http.StatusOK, s.ipFilter.Check(ip))
+}
+
+// normalizeIPEntry 规范化面板提交的条目。
+// mask 为 0 或 32 时按单个 IP/CIDR 处理；其余按掩码处理，如 192.168.1.5 + /24 → 192.168.1.0/24。
+func normalizeIPEntry(value string, mask int) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("请填写 IP 地址")
+	}
+	if mask != 0 && mask != 32 {
+		if mask < 0 || mask > 32 {
+			return "", fmt.Errorf("无效的掩码 /%d", mask)
+		}
+		ip := net.ParseIP(value)
+		if ip == nil {
+			return "", fmt.Errorf("按掩码添加时 %q 不是合法的 IP 地址", value)
+		}
+		ip4 := ip.To4()
+		if ip4 == nil {
+			return "", fmt.Errorf("按掩码添加仅支持 IPv4 地址")
+		}
+		mask4 := net.CIDRMask(mask, 32)
+		// IPNet.String() 不会自动抹掉主机位，需先按掩码取网络号
+		return (&net.IPNet{IP: ip4.Mask(mask4), Mask: mask4}).String(), nil
+	}
+	if ip := net.ParseIP(value); ip != nil {
+		return ip.String(), nil
+	}
+	if _, n, err := net.ParseCIDR(value); err == nil {
+		return n.String(), nil
+	}
+	return "", fmt.Errorf("%q 不是合法的 IP 或 CIDR", value)
 }
 
 func writeJSON(rw http.ResponseWriter, code int, v interface{}) {

@@ -20,6 +20,7 @@ const (
 
 // Filter IP 黑白名单过滤器
 type Filter struct {
+	mu      sync.RWMutex // 保护以下三个字段，使名单支持运行期热更新
 	enabled bool
 	allow   []*net.IPNet // 白名单，非空时仅放行其中的地址
 	deny    []*net.IPNet // 黑名单，优先级高于白名单
@@ -39,6 +40,34 @@ func New(cfg config.IPFilterConfig) (*Filter, error) {
 		return nil, fmt.Errorf("denyList: %w", err)
 	}
 	return f, nil
+}
+
+// Validate 只校验名单格式，不构建过滤器
+func Validate(cfg config.IPFilterConfig) error {
+	if _, err := parseList(cfg.AllowList); err != nil {
+		return fmt.Errorf("allowList: %w", err)
+	}
+	if _, err := parseList(cfg.DenyList); err != nil {
+		return fmt.Errorf("denyList: %w", err)
+	}
+	return nil
+}
+
+// Reload 用新配置替换名单内容（运行期热更新）。
+// 解析失败时直接返回错误，原有名单保持不变。
+func (f *Filter) Reload(cfg config.IPFilterConfig) error {
+	allow, err := parseList(cfg.AllowList)
+	if err != nil {
+		return fmt.Errorf("allowList: %w", err)
+	}
+	deny, err := parseList(cfg.DenyList)
+	if err != nil {
+		return fmt.Errorf("denyList: %w", err)
+	}
+	f.mu.Lock()
+	f.enabled, f.allow, f.deny = cfg.Enable, allow, deny
+	f.mu.Unlock()
+	return nil
 }
 
 // parseList 解析 IP / CIDR 列表，单个 IP 会转换为 /32 或 /128
@@ -75,14 +104,34 @@ func contains(list []*net.IPNet, ip net.IP) bool {
 	return false
 }
 
+// match 返回命中的第一条规则（CIDR 文本形式），未命中返回空串
+func match(list []*net.IPNet, ip net.IP) string {
+	for _, n := range list {
+		if n.Contains(ip) {
+			return n.String()
+		}
+	}
+	return ""
+}
+
 // Enabled 是否启用过滤
 func (f *Filter) Enabled() bool {
-	return f != nil && f.enabled
+	if f == nil {
+		return false
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.enabled
 }
 
 // Allow 判断 IP 是否放行：黑名单优先，白名单非空时仅放行白名单内的地址
 func (f *Filter) Allow(ip net.IP) bool {
-	if !f.Enabled() {
+	if f == nil {
+		return true
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if !f.enabled {
 		return true
 	}
 	if ip == nil {
@@ -95,6 +144,47 @@ func (f *Filter) Allow(ip net.IP) bool {
 		return contains(f.allow, ip)
 	}
 	return true
+}
+
+// CheckResult IP 检测结果，用于面板展示「该 IP 在当前配置下会不会被拦截」
+type CheckResult struct {
+	Enabled bool   `json:"enabled"` // 过滤是否启用
+	Allowed bool   `json:"allowed"` // 是否放行
+	Rule    string `json:"rule"`    // 命中的规则（CIDR 文本），空表示未命中任何规则
+	Source  string `json:"source"`  // deny / allow / default
+}
+
+// Check 按当前名单判定指定 IP，并给出命中的具体规则（语义与 Allow 完全一致）
+func (f *Filter) Check(ip net.IP) CheckResult {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	res := CheckResult{Enabled: f.enabled}
+	if !f.enabled {
+		res.Allowed = true
+		res.Source = "default"
+		return res
+	}
+	if ip == nil {
+		res.Source = "default"
+		return res
+	}
+	if rule := match(f.deny, ip); rule != "" {
+		res.Rule, res.Source = rule, "deny"
+		return res
+	}
+	if len(f.allow) > 0 {
+		if rule := match(f.allow, ip); rule != "" {
+			res.Allowed, res.Rule, res.Source = true, rule, "allow"
+			return res
+		}
+		// 白名单非空且未命中任何白名单规则：拦截
+		res.Source = "default"
+		return res
+	}
+	res.Allowed = true
+	res.Source = "default"
+	return res
 }
 
 // AllowAddr 判断 host:port 形式的对端地址是否放行

@@ -27,7 +27,7 @@ func main() {
 	}
 	defer util.Sync()
 
-	srv, err := server.NewServer(cfg)
+	srv, err := server.NewServer(cfg, *configPath)
 	if err != nil {
 		util.Logger.Fatalw("init server", "err", err)
 	}
