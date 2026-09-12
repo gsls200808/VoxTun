@@ -45,6 +45,7 @@ type extRecord struct {
 	peer         string // 最近一次注册的来源地址
 	lastRegister time.Time
 	lastAnswer   time.Time
+	lastPeer     string // 最后一次接通通话的对方号码（可能是未注册的外线号码）
 	calls        int64
 	callSeconds  int64
 	bytesIn      int64
@@ -53,7 +54,8 @@ type extRecord struct {
 
 // extCall 一次呼叫；started 为零值表示尚未接通（如振铃中）
 type extCall struct {
-	keys    []string // 参与该呼叫的分机记录键
+	keys    []string          // 参与该呼叫的已注册分机记录键
+	peers   map[string]string // 分机记录键 -> 对方号码（对方未注册时为外线号码，无法识别时为空）
 	started time.Time
 	seen    time.Time
 }
@@ -110,7 +112,8 @@ func (t *extTracker) markRegister(protocol, number, peer string) {
 }
 
 // pendCall 记录一次呼叫中已注册分机的参与情况（尚未接通）。
-// 只为已由 markRegister 建立记录的分机登记：未注册号码（外线、中继号等）忽略。
+// 只为已由 markRegister 建立记录的分机登记：未注册号码（外线、中继号等）忽略，
+// 但它作为「对方号码」保留给已注册的通话方（外呼时面板能看到外线被叫）。
 // 一次呼叫没有任何已注册分机参与时不跟踪；callKey 相同的呼叫只登记一次，
 // 因此 SIP 的 re-INVITE / 重传不会重置呼叫。
 func (t *extTracker) pendCall(protocol, callKey, caller, callee string) {
@@ -124,11 +127,12 @@ func (t *extTracker) pendCall(protocol, callKey, caller, callee string) {
 		return
 	}
 	keys := make([]string, 0, 2)
-	add := func(n string) {
-		if n == "" {
+	peers := make(map[string]string, 2)
+	add := func(self, other string) {
+		if self == "" {
 			return
 		}
-		key := extKey(protocol, n)
+		key := extKey(protocol, self)
 		if _, ok := t.exts[key]; !ok {
 			// 未注册过的号码不建立统计记录，呼叫指标也不归因给它
 			return
@@ -139,13 +143,14 @@ func (t *extTracker) pendCall(protocol, callKey, caller, callee string) {
 			}
 		}
 		keys = append(keys, key)
+		peers[key] = other // 对方未注册也保留（如外呼的外线被叫）；无法识别时为空串
 	}
-	add(caller)
-	add(callee)
+	add(caller, callee)
+	add(callee, caller)
 	if len(keys) == 0 {
 		return
 	}
-	t.calls[callKey] = &extCall{keys: keys, seen: now}
+	t.calls[callKey] = &extCall{keys: keys, peers: peers, seen: now}
 	t.pruneCallsLocked()
 }
 
@@ -163,6 +168,7 @@ func (t *extTracker) answerCall(callKey string) {
 		if r, ok := t.exts[key]; ok {
 			r.calls++
 			r.lastAnswer = now
+			r.lastPeer = c.peers[key]
 		}
 	}
 }
@@ -386,6 +392,7 @@ type extView struct {
 	Peer         string `json:"peer"`
 	LastRegister int64  `json:"lastRegister"`
 	LastAnswer   int64  `json:"lastAnswer"`
+	LastPeer     string `json:"lastPeer"`
 	Calls        int64  `json:"calls"`
 	CallSeconds  int64  `json:"callSeconds"`
 	BytesIn      int64  `json:"bytesIn"`
@@ -412,6 +419,7 @@ func (t *extTracker) snapshot() []extView {
 			Peer:         r.peer,
 			LastRegister: unixOrZero(r.lastRegister),
 			LastAnswer:   unixOrZero(r.lastAnswer),
+			LastPeer:     r.lastPeer,
 			Calls:        r.calls,
 			CallSeconds:  r.callSeconds,
 			BytesIn:      r.bytesIn,
