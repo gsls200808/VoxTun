@@ -26,6 +26,8 @@ type Server struct {
 	publicIP  string // publicAddr 解析后的公网 IP（用于 SDP 重写）
 	ipFilter  *ipfilter.Filter
 	tlsConfig *tls.Config // sip-tls 代理使用的 TLS 配置（证书未配置时为 nil）
+	startAt   time.Time
+	web       *webServer // 管理面板（未配置 webServer.port 时为 nil）
 }
 
 // NewServer 创建服务端
@@ -42,6 +44,7 @@ func NewServer(cfg *config.ServerConfig) (*Server, error) {
 		rtpPool:  newRTPPortPool(cfg),
 		publicIP: resolvePublicIP(cfg.PublicAddr),
 		ipFilter: ipFilter,
+		startAt:  time.Now(),
 	}
 	if cfg.TLSCertFile != "" || cfg.TLSKeyFile != "" {
 		if cfg.TLSCertFile == "" || cfg.TLSKeyFile == "" {
@@ -84,6 +87,10 @@ func resolvePublicIP(addr string) string {
 
 // Run 启动服务端
 func (s *Server) Run() error {
+	// 管理面板启动失败不影响隧道功能，只记录错误
+	if err := s.startWebServer(); err != nil {
+		util.Logger.Errorw("start dashboard failed", "err", err)
+	}
 	addr := fmt.Sprintf("%s:%d", s.cfg.BindAddr, s.cfg.BindPort)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -147,6 +154,9 @@ func (s *Server) UnregisterProxy(proxyType string, remotePort int) {
 
 // Shutdown 关闭服务端
 func (s *Server) Shutdown() {
+	if s.web != nil {
+		_ = s.web.httpSrv.Close()
+	}
 	if s.listener != nil {
 		_ = s.listener.Close()
 	}

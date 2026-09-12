@@ -67,7 +67,7 @@ func (c *Client) auth() error {
 	hostname, _ := os.Hostname()
 	auth := protocol.Auth{
 		Token:    c.cfg.Token,
-		Version:  "1.0.0",
+		Version:  consts.Version,
 		Hostname: hostname,
 	}
 	if err := c.sendMsg(consts.TypeAuth, auth); err != nil {

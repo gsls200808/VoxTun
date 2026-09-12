@@ -1,5 +1,8 @@
 package consts
 
+// Version 版本号，用于客户端握手与管理面板展示
+const Version = "1.0.0"
+
 // 服务类型
 const (
 	ProxyTypeTCP    = "tcp"

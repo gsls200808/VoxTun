@@ -33,3 +33,13 @@ ipFilter:
   # 黑名单：优先级高于白名单
   denyList: []
   #   - "1.2.3.4"
+
+# 管理面板（Web 控制台）
+# port 为 0 时不启动；一旦配置端口，user/password 必须同时设置。
+# 面板不受 ipFilter 约束（避免管理员被锁在门外），请用云安全组/防火墙限制来源 IP，
+# 或把 addr 设为 127.0.0.1 后通过 SSH 隧道访问（ssh -L 7500:127.0.0.1:7500 <server>）
+webServer:
+  addr: "0.0.0.0"
+  port: 0                # 例如 7500
+  user: "admin"
+  password: ""           # 请改为强密码，留空且 port 非 0 时服务端会报错并跳过面板

@@ -19,6 +19,23 @@ type ServerConfig struct {
 	TLSKeyFile    string `yaml:"tlsKeyFile"`    // sip-tls 代理使用的 TLS 私钥（PEM）
 	AllowPorts    []PortRange `yaml:"allowPorts"` // 允许客户端代理的端口范围
 	IPFilter      IPFilterConfig `yaml:"ipFilter"` // IP 黑白名单过滤
+	WebServer     WebServerConfig `yaml:"webServer"` // 管理面板
+}
+
+// WebServerConfig 管理面板配置
+// port 为 0 或未配置时不启动面板；一旦配置端口，则 user/password 必须同时设置。
+// 面板不受 ipFilter 约束（避免管理员被锁在门外），请用防火墙限制来源，
+// 或只监听 127.0.0.1 通过 SSH 隧道访问。
+type WebServerConfig struct {
+	Addr     string `yaml:"addr"`     // 监听地址，默认 0.0.0.0
+	Port     int    `yaml:"port"`     // 监听端口，0 表示不启用面板
+	User     string `yaml:"user"`     // 登录用户名
+	Password string `yaml:"password"` // 登录密码
+}
+
+// Enabled 是否启用管理面板
+func (w WebServerConfig) Enabled() bool {
+	return w.Port > 0
 }
 
 // PortRange 端口范围

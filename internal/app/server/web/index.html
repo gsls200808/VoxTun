@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VoxTun 服务端面板</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<!-- display:none 避免未渲染的模板闪现；vue:mounted 触发后由 boot() 移除 -->
+<div id="app" style="display:none" @vue:mounted="boot">
+
+  <!-- 加载中 -->
+  <div class="center" v-if="!ready">
+    <div class="spinner"></div>
+  </div>
+
+  <!-- 登录 -->
+  <div class="center" v-else-if="!logged">
+    <form class="login-card" @submit.prevent="login">
+      <h1>VoxTun</h1>
+      <p class="sub">服务端管理面板</p>
+      <label>用户名</label>
+      <input v-model="user" autocomplete="username" autofocus>
+      <label>密码</label>
+      <input type="password" v-model="pass" autocomplete="current-password">
+      <p class="err" v-if="loginErr">{{ loginErr }}</p>
+      <button type="submit">登 录</button>
+    </form>
+  </div>
+
+  <!-- 面板 -->
+  <div v-else class="page">
+    <header class="topbar">
+      <div class="brand">VoxTun <span class="ver">v{{ server.version }}</span></div>
+      <button class="ghost" @click="logout">退出登录</button>
+    </header>
+
+    <section class="cards">
+      <div class="card">
+        <div class="k">运行时长</div>
+        <div class="v">{{ fmtDuration(server.uptime) }}</div>
+      </div>
+      <div class="card">
+        <div class="k">启动时间</div>
+        <div class="v sm">{{ fmtTime(server.startAt) }}</div>
+      </div>
+      <div class="card">
+        <div class="k">控制端口</div>
+        <div class="v sm">{{ server.bindAddr }}:{{ server.bindPort }}</div>
+      </div>
+      <div class="card">
+        <div class="k">公网地址</div>
+        <div class="v sm">{{ server.publicAddr || '-' }}</div>
+      </div>
+      <div class="card">
+        <div class="k">代理 / 客户端</div>
+        <div class="v">{{ server.proxyCount }} / {{ server.clientCount }}</div>
+      </div>
+      <div class="card">
+        <div class="k">累计流量 入 / 出</div>
+        <div class="v sm">{{ fmtBytes(server.bytesIn) }} / {{ fmtBytes(server.bytesOut) }}</div>
+      </div>
+    </section>
+
+    <section class="block">
+      <h2>代理 <span class="count">{{ proxies.length }}</span></h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>类型</th>
+              <th>内网地址</th>
+              <th>公网端口</th>
+              <th>客户端</th>
+              <th class="num">连接</th>
+              <th class="num">入流量</th>
+              <th class="num">出流量</th>
+              <th>启动时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="p in proxies" :key="p.name">
+              <td class="strong">{{ p.name }}</td>
+              <td>
+                <span class="tag">{{ p.type }}</span>
+                <span class="tag sdp" v-if="p.rewriteSDP">SDP</span>
+              </td>
+              <td>{{ p.localIP }}:{{ p.localPort }}</td>
+              <td>{{ p.remotePort }}</td>
+              <td class="dim">{{ p.clientAddr }}</td>
+              <td class="num">{{ p.conns }}</td>
+              <td class="num">{{ fmtBytes(p.bytesIn) }}</td>
+              <td class="num">{{ fmtBytes(p.bytesOut) }}</td>
+              <td class="dim">{{ fmtTime(p.startAt) }}</td>
+              <td>
+                <button class="danger" :disabled="busy === 'proxy:' + p.name" @click="closeProxy(p.name)">关闭</button>
+              </td>
+            </tr>
+            <tr v-if="proxies.length === 0">
+              <td colspan="10" class="empty">暂无代理</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="block">
+      <h2>客户端 <span class="count">{{ clients.length }}</span></h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>地址</th>
+              <th>状态</th>
+              <th class="num">代理数</th>
+              <th>连接时间</th>
+              <th>最后心跳</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="c in clients" :key="c.addr">
+              <td class="strong">{{ c.addr }}</td>
+              <td><span class="dot" :class="c.authed ? 'ok' : 'warn'"></span>{{ c.authed ? '在线' : '未认证' }}</td>
+              <td class="num">{{ c.proxyCount }}</td>
+              <td class="dim">{{ fmtTime(c.startAt) }}</td>
+              <td class="dim">{{ fmtAgo(c.lastPing) }}</td>
+              <td>
+                <button class="danger" :disabled="busy === 'client:' + c.addr" @click="kickClient(c.addr)">断开</button>
+              </td>
+            </tr>
+            <tr v-if="clients.length === 0">
+              <td colspan="6" class="empty">暂无客户端</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer class="foot">
+      <span>每 3 秒自动刷新</span>
+      <button class="ghost" @click="refresh">立即刷新</button>
+    </footer>
+
+    <div class="toast" v-if="toast">{{ toast }}</div>
+  </div>
+</div>
+
+<script src="/petite-vue.iife.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

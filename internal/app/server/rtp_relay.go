@@ -74,6 +74,8 @@ type RTPRelay struct {
 
 	udpConn    *net.UDPConn
 	client     *ClientSession
+	// stats 指向所属代理的统计，媒体流量计入该代理（为 nil 时不统计）
+	stats       *proxyStats
 	peerAddr    *net.UDPAddr // 外部对端地址（首个 RTP 包学习）
 	peerMu      sync.Mutex
 	lastActive  time.Time
@@ -114,6 +116,9 @@ func (r *RTPRelay) readLoop() {
 			continue
 		}
 		r.lastActive = time.Now()
+		if r.stats != nil {
+			r.stats.addIn(n)
+		}
 		// 学习对端地址
 		r.peerMu.Lock()
 		if r.peerAddr == nil {
@@ -165,6 +170,10 @@ func (r *RTPRelay) SendToPeer(data []byte) {
 	r.lastActive = time.Now()
 	if _, err := r.udpConn.WriteToUDP(data, peer); err != nil {
 		util.Logger.Errorw("rtp relay write to peer", "relay", r.ID, "err", err)
+		return
+	}
+	if r.stats != nil {
+		r.stats.addOut(len(data))
 	}
 }
 

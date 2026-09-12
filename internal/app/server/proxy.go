@@ -29,6 +29,9 @@ type ProxyInfo struct {
 	remotePort int
 	rewriteSDP bool
 	client     *ClientSession
+	startAt    time.Time
+	// 运行期统计（转发路径上累加），供管理面板展示
+	stats proxyStats
 
 	// TCP 相关
 	tcpListener net.Listener
@@ -58,6 +61,7 @@ type udpPeer struct {
 // Start 启动代理监听
 func (p *ProxyInfo) Start(srv *Server) error {
 	p.stopped = make(chan struct{})
+	p.startAt = time.Now()
 	if p.proxyType == consts.ProxyTypeTCP {
 		switch p.origType {
 		case consts.ProxyTypeSIPTLS:
@@ -178,6 +182,8 @@ func (p *ProxyInfo) handlePendingConns() {
 }
 
 func (p *ProxyInfo) handleTCPConn(extConn net.Conn, isTLS bool) {
+	p.stats.activeConns.Add(1)
+	defer p.stats.activeConns.Add(-1)
 	// 请求客户端新建 work 连接
 	if err := p.client.RequestWorkConn(p.name); err != nil {
 		util.Logger.Errorw("request work conn", "err", err)
@@ -200,7 +206,7 @@ func (p *ProxyInfo) handleTCPConn(extConn net.Conn, isTLS bool) {
 		p.bridgeSIP(extConn, workConn)
 	} else {
 		util.Logger.Infow("tcp proxy join", "proxy", p.name, "remote", extConn.RemoteAddr().String())
-		util.Join(extConn, workConn)
+		util.JoinCounted(extConn, workConn, p.stats.addIn, p.stats.addOut)
 	}
 	_ = extConn.Close()
 	_ = workConn.Close()
@@ -214,7 +220,7 @@ func (p *ProxyInfo) bridgeSIP(extConn, workConn net.Conn) {
 	// 外部话机 -> 内网服务：原样转发，仅检测 BYE 释放 RTP 中继
 	go func() {
 		defer wg.Done()
-		p.pipeSIP(extConn, workConn, false)
+		p.pipeSIP(extConn, workConn, false, p.stats.addIn)
 		if tc, ok := workConn.(interface{ CloseWrite() error }); ok {
 			_ = tc.CloseWrite()
 		}
@@ -222,7 +228,7 @@ func (p *ProxyInfo) bridgeSIP(extConn, workConn net.Conn) {
 	// 内网服务 -> 外部话机：改写 SDP / 路由头并分配 RTP 中继
 	go func() {
 		defer wg.Done()
-		p.pipeSIP(workConn, extConn, true)
+		p.pipeSIP(workConn, extConn, true, p.stats.addOut)
 		if tc, ok := extConn.(interface{ CloseWrite() error }); ok {
 			_ = tc.CloseWrite()
 		}
@@ -232,7 +238,8 @@ func (p *ProxyInfo) bridgeSIP(extConn, workConn net.Conn) {
 
 // pipeSIP 从 src 逐条读取 SIP 消息并写入 dst。
 // fromInternal=true 表示「内网服务 -> 外部话机」方向，需要做 SDP / 路由头重写。
-func (p *ProxyInfo) pipeSIP(src, dst net.Conn, fromInternal bool) {
+// count 用于累加该方向写出的字节数（流量统计）。
+func (p *ProxyInfo) pipeSIP(src, dst net.Conn, fromInternal bool, count func(int)) {
 	br := bufio.NewReader(src)
 	for {
 		msg, err := sip.ReadMessageFromStream(br)
@@ -251,6 +258,7 @@ func (p *ProxyInfo) pipeSIP(src, dst net.Conn, fromInternal bool) {
 		if _, err := dst.Write(msg); err != nil {
 			return
 		}
+		count(len(msg))
 	}
 }
 
@@ -283,7 +291,7 @@ func (p *ProxyInfo) rewriteSIPForExternal(data []byte) []byte {
 	entries := msg.ExtractMediaEntries()
 	if len(entries) > 0 {
 		callID := msg.GetHeader("Call-ID")
-		relayPorts := p.client.getOrCreateRTPRelays(callID, entries)
+		relayPorts := p.client.getOrCreateRTPRelays(callID, entries, p)
 		if len(relayPorts) > 0 {
 			msg.RewriteSDPWithRelays(publicAddr, relayPorts)
 		} else {
@@ -339,6 +347,7 @@ func (p *ProxyInfo) handleUDPPacket(data []byte, raddr *net.UDPAddr) {
 		p.udpPeers[key] = &udpPeer{addr: raddr}
 	}
 	p.udpPeersMu.Unlock()
+	p.stats.addIn(len(data))
 
 	// BYE 检测：任一方向的 BYE 都释放该 Call-ID 的 RTP relay
 	if p.rewriteSDP && p.origType == consts.ProxyTypeSIP && sip.IsSIP(data) {
@@ -380,7 +389,20 @@ func (p *ProxyInfo) SendUDPPacketToPeer(remoteAddr string, data []byte) {
 	_, err := p.udpConn.WriteToUDP(data, peer.addr)
 	if err != nil {
 		util.Logger.Errorw("udp write to peer", "err", err)
+		return
 	}
+	p.stats.addOut(len(data))
+}
+
+// connCount 当前连接数：TCP 代理为活动外部连接数，UDP 代理为已见到的外部对端数
+func (p *ProxyInfo) connCount() int64 {
+	if p.proxyType == consts.ProxyTypeTCP {
+		return p.stats.activeConns.Load()
+	}
+	p.udpPeersMu.RLock()
+	n := int64(len(p.udpPeers))
+	p.udpPeersMu.RUnlock()
+	return n
 }
 
 // Stop 停止代理

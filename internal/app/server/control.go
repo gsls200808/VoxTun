@@ -17,6 +17,7 @@ type ClientSession struct {
 	conn       net.Conn
 	server     *Server
 	authed     bool
+	startAt    time.Time
 	proxies    map[string]*ProxyInfo
 	proxiesMu  sync.RWMutex
 	sendMu     sync.Mutex
@@ -35,6 +36,7 @@ func NewClientSession(conn net.Conn, srv *Server) *ClientSession {
 	return &ClientSession{
 		conn:      conn,
 		server:    srv,
+		startAt:   time.Now(),
 		proxies:   make(map[string]*ProxyInfo),
 		lastPing:  time.Now(),
 		closed:    make(chan struct{}),
@@ -297,6 +299,22 @@ func (c *ClientSession) GetProxy(name string) *ProxyInfo {
 	return c.proxies[name]
 }
 
+// closeProxy 关闭本会话内的指定代理，成功返回 true（管理面板操作用）
+func (c *ClientSession) closeProxy(name string) bool {
+	c.proxiesMu.Lock()
+	p, ok := c.proxies[name]
+	if ok {
+		delete(c.proxies, name)
+	}
+	c.proxiesMu.Unlock()
+	if !ok {
+		return false
+	}
+	p.Stop()
+	c.server.UnregisterProxy(p.proxyType, p.remotePort)
+	return true
+}
+
 // getPublicAddr 获取公网地址（供 SDP 重写使用，优先返回解析后的 IP）
 func (c *ClientSession) getPublicAddr() string {
 	if c.server.publicIP != "" {
@@ -310,8 +328,9 @@ func (c *ClientSession) getPublicAddr() string {
 
 // getOrCreateRTPRelays 为 SIP 消息中的 SDP 媒体条目分配 RTP relay。
 // 若该 Call-ID 已有 relay 则复用，否则新建。
+// owner 为触发本次分配（即 SDP 所属）的代理，中继的媒体流量计入该代理的统计。
 // 返回 map[mediaIdx]publicPort 供 SDP 改写使用。
-func (c *ClientSession) getOrCreateRTPRelays(callID string, entries []sip.MediaEntry) map[int]int {
+func (c *ClientSession) getOrCreateRTPRelays(callID string, entries []sip.MediaEntry, owner *ProxyInfo) map[int]int {
 	if callID == "" || len(entries) == 0 {
 		return nil
 	}
@@ -341,6 +360,9 @@ func (c *ClientSession) getOrCreateRTPRelays(callID string, entries []sip.MediaE
 			client:     c,
 			closed:     make(chan struct{}),
 			pool:       c.server.rtpPool,
+		}
+		if owner != nil {
+			relay.stats = &owner.stats
 		}
 		if err := relay.Start(); err != nil {
 			util.Logger.Errorw("rtp relay start", "relay", relay.ID, "err", err)
