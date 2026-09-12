@@ -18,6 +18,10 @@ import (
 // 最后注册时间、最后接通时间、接通次数、累计通话时长与收发字节。
 // 只读取报文、不改写也不报错，解析失败一律静默忽略，不影响隧道功能。
 //
+// 只统计注册过的分机：记录只在 SIP REGISTER / IAX REGREQ 时建立；
+// 呼叫中出现但从未注册的号码（外线被叫、中继号等）不会进入列表，
+// 通话与媒体字节也只归因给参与呼叫的已注册分机。
+//
 // 「接通」口径：SIP 取 INVITE 的 200 OK / ACK，IAX 取 ACCEPT；
 // 通话时长从接通算到 BYE / HANGUP，未接通的呼叫不计入次数与时长。
 
@@ -105,8 +109,10 @@ func (t *extTracker) markRegister(protocol, number, peer string) {
 	r.lastRegister = time.Now()
 }
 
-// pendCall 记录一次呼叫的参与方（尚未接通）。
-// callKey 相同的呼叫只登记一次，因此 SIP 的 re-INVITE / 重传不会重置呼叫。
+// pendCall 记录一次呼叫中已注册分机的参与情况（尚未接通）。
+// 只为已由 markRegister 建立记录的分机登记：未注册号码（外线、中继号等）忽略。
+// 一次呼叫没有任何已注册分机参与时不跟踪；callKey 相同的呼叫只登记一次，
+// 因此 SIP 的 re-INVITE / 重传不会重置呼叫。
 func (t *extTracker) pendCall(protocol, callKey, caller, callee string) {
 	if callKey == "" || (caller == "" && callee == "") {
 		return
@@ -123,7 +129,10 @@ func (t *extTracker) pendCall(protocol, callKey, caller, callee string) {
 			return
 		}
 		key := extKey(protocol, n)
-		t.recordLocked(key, protocol, n, "")
+		if _, ok := t.exts[key]; !ok {
+			// 未注册过的号码不建立统计记录，呼叫指标也不归因给它
+			return
+		}
 		for _, k := range keys {
 			if k == key {
 				return
@@ -133,6 +142,9 @@ func (t *extTracker) pendCall(protocol, callKey, caller, callee string) {
 	}
 	add(caller)
 	add(callee)
+	if len(keys) == 0 {
+		return
+	}
 	t.calls[callKey] = &extCall{keys: keys, seen: now}
 	t.pruneCallsLocked()
 }

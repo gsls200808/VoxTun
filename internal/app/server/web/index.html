@@ -143,9 +143,9 @@
     <section class="block">
       <h2>分机号分析 <span class="count">{{ exts.length }}</span></h2>
       <p class="hint ext-hint">
-        从经过隧道的 SIP / IAX 信令旁路解析：最后注册取 REGISTER / REGREQ，最后通话取接通时刻
-        （SIP 200 OK、IAX ACCEPT）；次数与时长只统计已接通的呼叫，流量含信令与所属媒体。
-        服务重启后重新学习，仅统计经过本服务端的流量。
+        只统计注册过的分机（SIP REGISTER / IAX REGREQ）；呼叫中出现的外线号码不会进入列表。
+        最后通话取接通时刻（SIP 200 OK、IAX ACCEPT）；次数与时长只统计已接通的呼叫，
+        通话与媒体流量仅归因给参与呼叫的已注册分机。服务重启后重新学习，仅统计经过本服务端的流量。
       </p>
       <div class="table-wrap">
         <table>
