@@ -119,6 +119,10 @@ func (r *RTPRelay) readLoop() {
 		if r.stats != nil {
 			r.stats.addIn(n)
 		}
+		// 分机号流量分析：媒体流量按 Call-ID 归到通话双方的分机
+		if r.client != nil {
+			r.client.server.extStats.addCallBytes(r.CallID, true, n)
+		}
 		// 学习对端地址
 		r.peerMu.Lock()
 		if r.peerAddr == nil {
@@ -174,6 +178,9 @@ func (r *RTPRelay) SendToPeer(data []byte) {
 	}
 	if r.stats != nil {
 		r.stats.addOut(len(data))
+	}
+	if r.client != nil {
+		r.client.server.extStats.addCallBytes(r.CallID, false, len(data))
 	}
 }
 

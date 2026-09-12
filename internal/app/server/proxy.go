@@ -215,12 +215,18 @@ func (p *ProxyInfo) handleTCPConn(extConn net.Conn, isTLS bool) {
 // bridgeSIP 桥接「外部话机的 SIP 连接（TLS 或明文）」与「内网服务的 work 连接」。
 // 两个方向均按 SIP over TCP 分帧；内网 -> 外部方向复用 SDP / 路由头重写与 RTP 中继。
 func (p *ProxyInfo) bridgeSIP(extConn, workConn net.Conn) {
+	// 分机号流量分析：按外部话机地址归因字节，并旁路解析 SIP 报文
+	peer := extConn.RemoteAddr().String()
+	tracker := p.client.server.extStats
 	var wg sync.WaitGroup
 	wg.Add(2)
 	// 外部话机 -> 内网服务：原样转发，仅检测 BYE 释放 RTP 中继
 	go func() {
 		defer wg.Done()
-		p.pipeSIP(extConn, workConn, false, p.stats.addIn)
+		p.pipeSIP(extConn, workConn, false, peer, func(n int) {
+			p.stats.addIn(n)
+			tracker.addPeerBytes(peer, true, n)
+		})
 		if tc, ok := workConn.(interface{ CloseWrite() error }); ok {
 			_ = tc.CloseWrite()
 		}
@@ -228,7 +234,10 @@ func (p *ProxyInfo) bridgeSIP(extConn, workConn net.Conn) {
 	// 内网服务 -> 外部话机：改写 SDP / 路由头并分配 RTP 中继
 	go func() {
 		defer wg.Done()
-		p.pipeSIP(workConn, extConn, true, p.stats.addOut)
+		p.pipeSIP(workConn, extConn, true, peer, func(n int) {
+			p.stats.addOut(n)
+			tracker.addPeerBytes(peer, false, n)
+		})
 		if tc, ok := extConn.(interface{ CloseWrite() error }); ok {
 			_ = tc.CloseWrite()
 		}
@@ -238,8 +247,9 @@ func (p *ProxyInfo) bridgeSIP(extConn, workConn net.Conn) {
 
 // pipeSIP 从 src 逐条读取 SIP 消息并写入 dst。
 // fromInternal=true 表示「内网服务 -> 外部话机」方向，需要做 SDP / 路由头重写。
+// peer 为该连接对应的外部话机地址，用于分机号流量分析。
 // count 用于累加该方向写出的字节数（流量统计）。
-func (p *ProxyInfo) pipeSIP(src, dst net.Conn, fromInternal bool, count func(int)) {
+func (p *ProxyInfo) pipeSIP(src, dst net.Conn, fromInternal bool, peer string, count func(int)) {
 	br := bufio.NewReader(src)
 	for {
 		msg, err := sip.ReadMessageFromStream(br)
@@ -250,6 +260,7 @@ func (p *ProxyInfo) pipeSIP(src, dst net.Conn, fromInternal bool, count func(int
 		if len(bytes.TrimSpace(msg)) == 0 {
 			continue
 		}
+		p.client.server.extStats.observeSIP(msg, peer)
 		if fromInternal {
 			msg = p.rewriteSIPForExternal(msg)
 		} else {
@@ -349,6 +360,15 @@ func (p *ProxyInfo) handleUDPPacket(data []byte, raddr *net.UDPAddr) {
 	p.udpPeersMu.Unlock()
 	p.stats.addIn(len(data))
 
+	// 分机号流量分析：先解析（可能建立「来源地址 -> 分机」的绑定），再按来源地址归因字节
+	switch p.origType {
+	case consts.ProxyTypeSIP:
+		p.client.server.extStats.observeSIP(data, key)
+	case consts.ProxyTypeIAX:
+		p.client.server.extStats.observeIAX(data, key)
+	}
+	p.client.server.extStats.addPeerBytes(key, true, len(data))
+
 	// BYE 检测：任一方向的 BYE 都释放该 Call-ID 的 RTP relay
 	if p.rewriteSDP && p.origType == consts.ProxyTypeSIP && sip.IsSIP(data) {
 		if msg := sip.Parse(data); msg != nil {
@@ -392,6 +412,15 @@ func (p *ProxyInfo) SendUDPPacketToPeer(remoteAddr string, data []byte) {
 		return
 	}
 	p.stats.addOut(len(data))
+
+	// 分机号流量分析：先解析（可能建立「来源地址 -> 分机」的绑定），再按话机地址归因字节
+	switch p.origType {
+	case consts.ProxyTypeSIP:
+		p.client.server.extStats.observeSIP(data, remoteAddr)
+	case consts.ProxyTypeIAX:
+		p.client.server.extStats.observeIAX(data, remoteAddr)
+	}
+	p.client.server.extStats.addPeerBytes(remoteAddr, false, len(data))
 }
 
 // connCount 当前连接数：TCP 代理为活动外部连接数，UDP 代理为已见到的外部对端数

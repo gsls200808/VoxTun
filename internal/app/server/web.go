@@ -59,6 +59,7 @@ func newWebServer(srv *Server) (*webServer, error) {
 	mux.HandleFunc("/api/login", w.handleLogin)
 	mux.HandleFunc("/api/logout", w.handleLogout)
 	mux.HandleFunc("/api/overview", w.requireAuth(srv.handleOverview))
+	mux.HandleFunc("/api/extensions", w.requireAuth(srv.handleExtensions))
 	mux.HandleFunc("/api/proxy/close", w.requireAuth(srv.handleProxyClose))
 	mux.HandleFunc("/api/client/close", w.requireAuth(srv.handleClientClose))
 	mux.HandleFunc("/api/ipfilter", w.requireAuth(srv.handleIPFilterGet))
@@ -255,6 +256,15 @@ type overviewResp struct {
 
 func (s *Server) handleOverview(rw http.ResponseWriter, r *http.Request) {
 	writeJSON(rw, http.StatusOK, s.snapshot())
+}
+
+// handleExtensions 返回分机号流量分析结果（列表始终为数组，避免前端拿到 null）
+func (s *Server) handleExtensions(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(rw, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	writeJSON(rw, http.StatusOK, map[string]interface{}{"extensions": s.extStats.snapshot()})
 }
 
 func (s *Server) handleProxyClose(rw http.ResponseWriter, r *http.Request) {

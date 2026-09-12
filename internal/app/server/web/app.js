@@ -31,6 +31,7 @@
     server: { version: '', startAt: 0, uptime: 0, bindAddr: '', bindPort: 0, publicAddr: '', proxyCount: 0, clientCount: 0, bytesIn: 0, bytesOut: 0 },
     proxies: [],
     clients: [],
+    exts: [],
     ipf: { enable: false, allowList: [], denyList: [] },
 
     // IP 检测 / 黑白名单操作
@@ -63,6 +64,7 @@
             self.logged = false;
             self.proxies = [];
             self.clients = [];
+            self.exts = [];
             return null;
           }
           if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -76,7 +78,7 @@
           self.logged = true;
           // 操作进行中不覆盖表单区数据，避免刚提交的改动被回显成旧值
           if (self.busy) return null;
-          return self.loadIPFilter();
+          return Promise.all([self.loadIPFilter(), self.loadExtensions()]);
         })
         .catch(function (e) {
           if (self.ready) self.notify('刷新失败: ' + e.message);
@@ -88,6 +90,15 @@
       return fetch('/api/ipfilter', { cache: 'no-store' })
         .then(function (r) { return r.ok ? r.json() : null; })
         .then(function (d) { if (d) self.ipf = d; })
+        .catch(function () {});
+    },
+
+    // loadExtensions 分机号流量分析：服务端旁路解析 SIP / IAX 信令得到
+    loadExtensions: function () {
+      var self = this;
+      return fetch('/api/extensions', { cache: 'no-store' })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) { if (d && d.extensions) self.exts = d.extensions; })
         .catch(function () {});
     },
 
@@ -121,6 +132,7 @@
         self.logged = false;
         self.proxies = [];
         self.clients = [];
+        self.exts = [];
         self.ipf = { enable: false, allowList: [], denyList: [] };
         self.checkResult = null;
       });

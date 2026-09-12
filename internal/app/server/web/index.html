@@ -141,6 +141,48 @@
     </section>
 
     <section class="block">
+      <h2>分机号分析 <span class="count">{{ exts.length }}</span></h2>
+      <p class="hint ext-hint">
+        从经过隧道的 SIP / IAX 信令旁路解析：最后注册取 REGISTER / REGREQ，最后通话取接通时刻
+        （SIP 200 OK、IAX ACCEPT）；次数与时长只统计已接通的呼叫，流量含信令与所属媒体。
+        服务重启后重新学习，仅统计经过本服务端的流量。
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>分机号</th>
+              <th>协议</th>
+              <th>来源地址</th>
+              <th>最后注册</th>
+              <th>最后通话</th>
+              <th class="num">通话次数</th>
+              <th class="num">累计通话</th>
+              <th class="num">入流量</th>
+              <th class="num">出流量</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="e in exts" :key="e.protocol + '/' + e.number">
+              <td class="strong">{{ e.number }}</td>
+              <td><span class="tag">{{ e.protocol }}</span></td>
+              <td class="dim">{{ e.peer || '-' }}</td>
+              <td class="dim">{{ fmtTime(e.lastRegister) }}</td>
+              <td class="dim">{{ fmtTime(e.lastAnswer) }}</td>
+              <td class="num">{{ e.calls }}</td>
+              <td class="num">{{ fmtDuration(e.callSeconds) }}</td>
+              <td class="num">{{ fmtBytes(e.bytesIn) }}</td>
+              <td class="num">{{ fmtBytes(e.bytesOut) }}</td>
+            </tr>
+            <tr v-if="exts.length === 0">
+              <td colspan="9" class="empty">暂无分机流量，等待话机注册或呼叫</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="block">
       <h2>IP 黑白名单
         <span class="count">{{ ipf.allowList.length }} 白 / {{ ipf.denyList.length }} 黑</span>
       </h2>

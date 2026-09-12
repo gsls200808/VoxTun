@@ -276,6 +276,13 @@ button.danger {
 button.danger:hover:not(:disabled) { background: rgba(227, 85, 97, .12); }
 button.danger:disabled { opacity: .45; cursor: not-allowed; }
 
+/* ---------- 分机号分析 ---------- */
+
+.ext-hint {
+  margin: -2px 0 10px;
+  max-width: 900px;
+}
+
 /* ---------- IP 黑白名单 ---------- */
 
 .panel {

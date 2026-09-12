@@ -27,6 +27,7 @@ type Server struct {
 	publicIP  string // publicAddr 解析后的公网 IP（用于 SDP 重写）
 	ipFilter  *ipfilter.Filter
 	ipMu      sync.Mutex  // 串行化面板对黑白名单的修改
+	extStats  *extTracker // 分机号流量分析（从 SIP / IAX 信令旁路解析）
 	tlsConfig *tls.Config // sip-tls 代理使用的 TLS 配置（证书未配置时为 nil）
 	startAt   time.Time
 	web       *webServer // 管理面板（未配置 webServer.port 时为 nil）
@@ -47,6 +48,7 @@ func NewServer(cfg *config.ServerConfig, configPath string) (*Server, error) {
 		rtpPool:    newRTPPortPool(cfg),
 		publicIP:   resolvePublicIP(cfg.PublicAddr),
 		ipFilter:   ipFilter,
+		extStats:   newExtTracker(),
 		startAt:    time.Now(),
 	}
 	if cfg.TLSCertFile != "" || cfg.TLSKeyFile != "" {
