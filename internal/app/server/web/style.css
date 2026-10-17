@@ -213,6 +213,7 @@ tbody tr:hover td { background: rgba(76, 139, 245, .06); }
 .num { text-align: right; }
 .strong { font-weight: 600; }
 .dim { color: var(--dim); font-size: 13px; }
+.geo { color: var(--dim); font-size: 12px; font-weight: 400; margin-top: 2px; }
 
 .empty {
   padding: 26px;

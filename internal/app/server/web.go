@@ -67,6 +67,7 @@ func newWebServer(srv *Server) (*webServer, error) {
 	mux.HandleFunc("/api/ipfilter/add", w.requireAuth(srv.handleIPFilterAdd))
 	mux.HandleFunc("/api/ipfilter/remove", w.requireAuth(srv.handleIPFilterRemove))
 	mux.HandleFunc("/api/ipfilter/check", w.requireAuth(srv.handleIPFilterCheck))
+	mux.HandleFunc("/api/ipgeo", w.requireAuth(srv.handleIPGeo))
 	w.httpSrv = &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", w.cfg.Addr, w.cfg.Port),
 		Handler:           mux,

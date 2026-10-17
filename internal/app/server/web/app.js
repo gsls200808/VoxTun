@@ -34,6 +34,10 @@
     exts: [],
     ipf: { enable: false, allowList: [], denyList: [] },
 
+    // IP 归属地：ip -> 展示文本（'' 表示已查询但无结果，不再重查）
+    geo: {},
+    geoPending: {},
+
     // IP 检测 / 黑白名单操作
     checkIP: '',
     checkResult: null,
@@ -76,6 +80,7 @@
           self.proxies = d.proxies || [];
           self.clients = d.clients || [];
           self.logged = true;
+          self.loadGeo();
           // 操作进行中不覆盖表单区数据，避免刚提交的改动被回显成旧值
           if (self.busy) return null;
           return Promise.all([self.loadIPFilter(), self.loadExtensions()]);
@@ -91,6 +96,33 @@
         .then(function (r) { return r.ok ? r.json() : null; })
         .then(function (d) { if (d) self.ipf = d; })
         .catch(function () {});
+    },
+
+    // geoOf 取客户端地址（host:port）对应 IP 的归属地展示文本，未查到时返回 ''
+    geoOf: function (addr) {
+      var host = String(addr).split(':')[0];
+      return this.geo[host] || '';
+    },
+
+    // loadGeo 对新出现的客户端 IP 逐个实时查询归属地；每个 IP 只查一次（含失败），
+    // 面板 3s 轮询不会放大上游请求量
+    loadGeo: function () {
+      var self = this;
+      this.clients.forEach(function (c) {
+        var host = String(c.addr).split(':')[0];
+        if (!host || self.geo[host] !== undefined || self.geoPending[host]) return;
+        self.geoPending[host] = true;
+        fetch('/api/ipgeo?ip=' + encodeURIComponent(host), { cache: 'no-store' })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (d) {
+            self.geo[host] = (d && d.text) || '';
+            delete self.geoPending[host];
+          })
+          .catch(function () {
+            self.geo[host] = '';
+            delete self.geoPending[host];
+          });
+      });
     },
 
     // loadExtensions 分机号流量分析：服务端旁路解析 SIP / IAX 信令得到
