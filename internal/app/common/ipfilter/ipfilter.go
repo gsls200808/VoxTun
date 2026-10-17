@@ -20,10 +20,11 @@ const (
 
 // Filter IP 黑白名单过滤器
 type Filter struct {
-	mu      sync.RWMutex // 保护以下三个字段，使名单支持运行期热更新
+	mu      sync.RWMutex // 保护以下四个字段，使名单支持运行期热更新
 	enabled bool
-	allow   []*net.IPNet // 白名单，非空时仅放行其中的地址
-	deny    []*net.IPNet // 黑名单，优先级高于白名单
+	allow   []*net.IPNet          // 白名单，非空时仅放行其中的地址
+	deny    []*net.IPNet          // 黑名单，优先级高于白名单
+	dynDeny map[string]time.Time // 动态拉黑：IP 文本 -> 过期时刻（运行期封禁用，不写配置文件）
 
 	logMu  sync.Mutex
 	denied map[string]time.Time // IP -> 上次记录拒绝日志的时间
@@ -31,7 +32,7 @@ type Filter struct {
 
 // New 根据配置构建过滤器
 func New(cfg config.IPFilterConfig) (*Filter, error) {
-	f := &Filter{enabled: cfg.Enable, denied: make(map[string]time.Time)}
+	f := &Filter{enabled: cfg.Enable, denied: make(map[string]time.Time), dynDeny: make(map[string]time.Time)}
 	var err error
 	if f.allow, err = parseList(cfg.AllowList); err != nil {
 		return nil, fmt.Errorf("allowList: %w", err)
@@ -124,7 +125,7 @@ func (f *Filter) Enabled() bool {
 	return f.enabled
 }
 
-// Allow 判断 IP 是否放行：黑名单优先，白名单非空时仅放行白名单内的地址
+// Allow 判断 IP 是否放行：黑名单（静态 + 动态）优先，白名单非空时仅放行白名单内的地址
 func (f *Filter) Allow(ip net.IP) bool {
 	if f == nil {
 		return true
@@ -137,11 +138,78 @@ func (f *Filter) Allow(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
-	if contains(f.deny, ip) {
+	if f.isDeniedLocked(ip, time.Now()) {
 		return false
 	}
 	if len(f.allow) > 0 {
 		return contains(f.allow, ip)
+	}
+	return true
+}
+
+// DenyDynamic 将指定 IP 动态拉黑 ttl 时长，过期自动失效。
+// 动态拉黑只存在内存，不写配置文件，进程重启即清空。
+func (f *Filter) DenyDynamic(host string, ttl time.Duration) {
+	now := time.Now()
+	f.mu.Lock()
+	// 顺手清理过期项，避免长期运行后 map 膨胀
+	for ip, exp := range f.dynDeny {
+		if !now.Before(exp) {
+			delete(f.dynDeny, ip)
+		}
+	}
+	f.dynDeny[host] = now.Add(ttl)
+	f.mu.Unlock()
+}
+
+// isDeniedLocked 判定静态黑名单或动态拉黑是否命中。调用前需持有读锁或写锁。
+func (f *Filter) isDeniedLocked(ip net.IP, now time.Time) bool {
+	if contains(f.deny, ip) {
+		return true
+	}
+	exp, ok := f.dynDeny[ip.String()]
+	return ok && now.Before(exp)
+}
+
+// Denied 仅按黑名单（静态 denyList + 动态拉黑）判定，与白名单无关。
+// 控制/工作连接入口用它替代完整白名单检查：voxcli 出口 IP 可能频繁变化，
+// 入口不再依赖白名单，但管理员手动拉黑与认证防爆的动态封禁仍然生效。
+func (f *Filter) Denied(ip net.IP) bool {
+	if f == nil || ip == nil {
+		return false
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if !f.enabled {
+		return false
+	}
+	return f.isDeniedLocked(ip, time.Now())
+}
+
+// DeniedAddr 判断 host:port 形式的对端地址是否命中黑名单（静态 + 动态）
+func (f *Filter) DeniedAddr(addr net.Addr) bool {
+	if !f.Enabled() || addr == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return false
+	}
+	return f.Denied(net.ParseIP(host))
+}
+
+// DeniedAddrLogged 与 DeniedAddr 相同，但命中时按去重节奏记录 INFO 日志，
+// 便于运维观察被封 IP 是否仍在尝试连接。
+func (f *Filter) DeniedAddrLogged(addr net.Addr, scope string) bool {
+	if !f.DeniedAddr(addr) {
+		return false
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return true
+	}
+	if f.shouldLog(host) {
+		util.Logger.Infow("ip rejected by filter", "client", addr.String(), "scope", scope)
 	}
 	return true
 }
@@ -171,6 +239,10 @@ func (f *Filter) Check(ip net.IP) CheckResult {
 	}
 	if rule := match(f.deny, ip); rule != "" {
 		res.Rule, res.Source = rule, "deny"
+		return res
+	}
+	if exp, ok := f.dynDeny[ip.String()]; ok && time.Now().Before(exp) {
+		res.Rule, res.Source = "dynamic-ban", "deny"
 		return res
 	}
 	if len(f.allow) > 0 {

@@ -26,6 +26,7 @@ type Server struct {
 	rtpPool   *rtpPortPool
 	publicIP  string // publicAddr 解析后的公网 IP（用于 SDP 重写）
 	ipFilter  *ipfilter.Filter
+	authGuard *authGuard // 控制连接认证防爆（连续失败后动态拉黑来源 IP）
 	ipMu      sync.Mutex  // 串行化面板对黑白名单的修改
 	extStats  *extTracker // 分机号流量分析（从 SIP / IAX 信令旁路解析）
 	tlsConfig *tls.Config // sip-tls 代理使用的 TLS 配置（证书未配置时为 nil）
@@ -48,6 +49,7 @@ func NewServer(cfg *config.ServerConfig, configPath string) (*Server, error) {
 		rtpPool:    newRTPPortPool(cfg),
 		publicIP:   resolvePublicIP(cfg.PublicAddr),
 		ipFilter:   ipFilter,
+		authGuard:  newAuthGuard(ipFilter.DenyDynamic),
 		extStats:   newExtTracker(),
 		startAt:    time.Now(),
 	}

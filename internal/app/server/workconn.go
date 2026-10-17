@@ -64,8 +64,11 @@ func (s *Server) handleWorkConn(conn net.Conn, firstPayload []byte) {
 
 // handleIncomingConn 处理新到的连接，判断是控制连接还是 work 连接
 func (s *Server) handleIncomingConn(conn net.Conn) {
-	// IP 黑白名单过滤
-	if !s.ipFilter.AllowAddrLogged(conn.RemoteAddr(), "control") {
+	// 黑名单过滤（静态 denyList + 认证防爆动态拉黑）。
+	// 控制/工作连接不再依赖白名单：voxcli 出口 IP 可能频繁变化，白名单来不及更新。
+	// 入口安全由 token 认证（handleControlConn）+ authGuard 防爆保证，与 frp 官方模型一致。
+	// 白名单仍在数据面入口（tcp/udp proxy、rtp relay）生效。
+	if s.ipFilter.DeniedAddrLogged(conn.RemoteAddr(), "control") {
 		_ = conn.Close()
 		return
 	}
@@ -104,10 +107,21 @@ func (s *Server) handleControlConn(conn net.Conn, authPayload []byte) {
 
 	if err := session.HandleAuthPayload(s.cfg.Token, authPayload); err != nil {
 		util.Logger.Warnw("client auth failed", "addr", remoteAddr, "err", err)
+		s.authGuard.ReportFailure(remoteHost(remoteAddr))
 		return
 	}
+	s.authGuard.ReportSuccess(remoteHost(remoteAddr))
 	util.Logger.Infow("client authenticated", "addr", remoteAddr)
 
 	go session.heartbeat()
 	session.Run()
+}
+
+// remoteHost 从 host:port 形式的对端地址提取 IP 部分，解析失败时原样返回
+func remoteHost(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	return host
 }
